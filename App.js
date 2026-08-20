@@ -1,30 +1,145 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, ActivityIndicator } from 'react-native';
+import { StyleSheet, Platform } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import NetInfo from '@react-native-community/netinfo'; 
 import { supabase } from './src/services/supabaseClient';
 
-// 📱 Authentication Screens
+// Authentication Screens
 import LoginScreen from './src/screens/LoginScreen';
 import RegisterScreen from './src/screens/RegisterScreen';
 import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
 
-// 🚀 Core Application Screens
+// Core Application Screens
 import DashboardScreen from './src/screens/DashboardScreen'; 
 import SettingsScreen from './src/screens/SettingsScreen';
+import DeviceControlScreen from './src/screens/DeviceControlScreen'; 
+import DevicePairingScreen from './src/screens/DevicePairingScreen';
 import NotificationScreen from './src/screens/NotificationScreen';
 import AlertsScreen from './src/screens/AlertsScreen';
-import ActivityLogsScreen from './src/screens/ActivityLogsScreen'; 
+import FamilyGroupScreen from './src/screens/FamilyGroupScreen';
+import FullscreenMapScreen from './src/screens/FullScreenMapScreen';
+import ProfileScreen from './src/screens/ProfileScreen';
+import GroupManagementScreen from './src/screens/GroupManagementScreen';
+import SoundManualScreen from './src/screens/SoundManualScreen';
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState('login');
-  const [userId, setUserId] = useState(null); // Tracks user integer ID dynamically
+  const [userId, setUserId] = useState(null); 
 
-  // 📡 Global Hardware & Network States
+  const [forgotPasswordSource, setForgotPasswordSource] = useState('login');
+
+  // Global Hardware & Network States
   const [isDeviceOn, setIsDeviceOn] = useState(false);
   const [syncState, setSyncState] = useState('IDLE'); 
-  const [isWifiConnected, setIsWifiConnected] = useState(true);
-  const [esp32IP, setEsp32IP] = useState("10.60.193.27"); 
+  const [isPhoneConnected, setIsPhoneConnected] = useState(true); 
+  const [esp32IP, setEsp32IP] = useState("192.168.43.1");
   
   const [notifications, setNotifications] = useState([]);
+
+  // Universal Helper Navigation Adaptor
+  const navigationAdapter = {
+    navigate: (screenName) => {
+      const screenMapping = {
+        'Notifications': 'notifications',
+        'Notification': 'notifications',
+        'Alerts': 'alerts',
+        'AlertLogs': 'alerts',
+        'FamilyGroup': 'familyGroup',
+        'GroupManagement': 'groupManagement',
+        'SoundManual': 'soundManual',
+        'FullscreenMap': 'fullscreenMap',
+        'FullScreenMap': 'fullscreenMap',
+        'Map': 'fullscreenMap',
+        'Settings': 'settings',
+        'DeviceControl': 'deviceControl', 
+        'DeviceSettings': 'deviceControl', 
+        'DevicePairing': 'devicePairing',
+        'Dashboard': 'dashboard',
+        'Login': 'login',
+        'Profile': 'profile',
+        'profile': 'profile'
+      };
+
+      const targetScreen = screenMapping[screenName] || screenName;
+      setCurrentScreen(targetScreen);
+    },
+    goBack: () => {
+      if (currentScreen === 'fullscreenMap') {
+        setCurrentScreen('familyGroup');
+      } else if (currentScreen === 'familyGroup') {
+        setCurrentScreen('groupManagement');
+      } else if (currentScreen === 'login' || currentScreen === 'register') {
+        setCurrentScreen('login');
+      } else {
+        setCurrentScreen('dashboard');
+      }
+    }
+  };
+
+  // Centralized login event logger
+  const handleUserLoginEvent = async (uid) => {
+    setUserId(uid);
+    logSystemEvent("User session validated.", "info");
+
+    try {
+      const { data: userData } = await supabase
+        .from('users')
+        .select('name, email, role')
+        .eq('id', uid)
+        .maybeSingle();
+
+      const { error: insertErr } = await supabase.from('audit_logs').insert([
+        {
+          user_id: uid,
+          user_name: userData?.name || userData?.email || 'User',
+          user_email: userData?.email || '',
+          role: userData?.role || 'user',
+          action: 'Login',
+          details: 'User logged in to application',
+          ip_address: Platform.OS === 'ios' ? 'iOS Device' : 'Android Device',
+          created_at: new Date().toISOString()
+        }
+      ]);
+
+      if (insertErr) console.log('Audit log write skipped:', insertErr.message);
+    } catch (err) {
+      console.log('Login event logging skipped:', err.message);
+    }
+
+    setCurrentScreen('dashboard');
+  };
+
+  // Auth Listener
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUserId(session.user.id);
+      }
+    }).catch(() => {});
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setUserId(session.user.id);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      if (supabase?.auth) {
+        await supabase.auth.signOut().catch(() => {});
+      }
+    } catch (err) {
+      console.log('Logout error:', err);
+    } finally {
+      setUserId(null);
+      setIsDeviceOn(false);
+      setSyncState('IDLE');
+      setCurrentScreen('login');
+    }
+  };
 
   const logSystemEvent = (msg, type = "info") => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -32,173 +147,210 @@ export default function App() {
     setNotifications(prev => [newEntry, ...prev]);
   };
 
-  // Monitor the hardware config table to grab the adaptive dynamic IP address automatically
+  // Real-time Network Listener
   useEffect(() => {
-    if (!userId) return;
+    const unsubscribe = NetInfo.addEventListener(state => {
+      setIsPhoneConnected(!!state.isConnected);
+    });
+    return () => unsubscribe();
+  }, []);
 
-    const fetchCurrentIP = async () => {
-      const { data } = await supabase.from('devices').select('device_ip, is_active').eq('user_id', userId).maybeSingle();
-      if (data) {
-        setEsp32IP(data.device_ip);
-        setIsDeviceOn(data.is_active);
-        setSyncState(data.device_ip !== '10.60.193.27' ? 'SUCCESS' : 'IDLE');
-      }
-    };
-    fetchCurrentIP();
-  }, [userId]);
+  // Screen Switch Router
+  const renderScreen = () => {
+    switch (currentScreen) {
+      case 'login':
+        return (
+          <LoginScreen 
+            navigation={navigationAdapter}
+            onNavigate={(screen) => {
+              if (screen === 'forgotPassword') {
+                setForgotPasswordSource('login');
+                setCurrentScreen('forgotPassword');
+              } else {
+                setCurrentScreen(screen);
+              }
+            }} 
+            onLoginSuccess={handleUserLoginEvent}
+          />
+        );
 
-  // 💓 Network Heartbeat Monitor + Error Alert Database Pipeline
-  useEffect(() => {
-    if (syncState !== 'SUCCESS' || esp32IP === "10.60.193.27" || !userId) return;
+      case 'register':
+        return (
+          <RegisterScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+          />
+        );
 
-    const networkInterval = setInterval(async () => {
-      try {
-        await fetch(`http://${esp32IP}/status`);
-        if (!isWifiConnected) {
-          setIsWifiConnected(true);
-          logSystemEvent("Local adaptive network connectivity link restored successfully.", "success");
-        }
-      } catch (err) {
-        if (isWifiConnected) {
-          setIsWifiConnected(false);
-          setIsDeviceOn(false); 
-          logSystemEvent("CRITICAL: Mobile hotspot connection to ESP32 hardware was lost!", "danger");
-          
-          // 💾 Log a clear connection error directly into the central notifications table
-          await supabase.from('notifications').insert([
-            { 
-              user_id: userId, 
-              notification_type: 'error_event',
-              title: 'Connection Lost',
-              message: 'Your phone disconnected from the device. Please check your Wi-Fi settings.',
-              metadata: 'wifi_error'
-            }
-          ]);
-        }
-      }
-    }, 4000);
+      case 'forgotPassword':
+        return (
+          <ForgotPasswordScreen 
+            navigation={navigationAdapter}
+            onNavigate={() => setCurrentScreen(forgotPasswordSource)} 
+          />
+        );
 
-    return () => clearInterval(networkInterval);
-  }, [isWifiConnected, syncState, esp32IP, userId]);
+      case 'dashboard':
+        return (
+          <DashboardScreen 
+            navigation={navigationAdapter}
+            onNavigate={setCurrentScreen} 
+            isPhoneConnected={isPhoneConnected}            
+            isDeviceConnected={syncState === 'SUCCESS'}    
+            isDeviceOn={isDeviceOn}                        
+            userId={userId} 
+            currentScreen={currentScreen}
+          />
+        );
 
-  // 🎤 Real-time Sound Stream Data Polling Loop
-  useEffect(() => {
-    if (!isDeviceOn || syncState !== 'SUCCESS' || esp32IP === "10.60.193.27" || !userId) return;
+      case 'profile':
+        return (
+          <ProfileScreen 
+            userId={userId} 
+            onNavigate={(screen) => navigationAdapter.navigate(screen)}
+            onLogout={handleLogout} 
+          />
+        );
 
-    const soundThreshold = 120; 
+      case 'settings':
+        return (
+          <SettingsScreen 
+            navigation={navigationAdapter}
+            onNavigate={(screen) => {
+              if (screen === 'forgotPassword') {
+                setForgotPasswordSource('settings');
+                setCurrentScreen('forgotPassword');
+              } else if (screen === 'login') {
+                handleLogout();
+              } else {
+                setCurrentScreen(screen);
+              }
+            }}
+            userId={userId}
+            onLogout={handleLogout}
+          />
+        );
 
-    const soundInterval = setInterval(async () => {
-      try {
-        const response = await fetch(`http://${esp32IP}/sound`);
-        if (response.ok) {
-          const rawText = await response.text(); 
-          
-          const volMatch = rawText.match(/Vol:\s*(\d+)/);
-          const leftSwMatch = rawText.match(/LeftSw:\s*(\d+)/);
-          
-          if (volMatch && leftSwMatch) {
-            const currentVolume = parseInt(volMatch[1], 10);
-            const isLeftSwitched = parseInt(leftSwMatch[1], 10) === 1;
+      case 'deviceControl':
+      case 'deviceSettings':
+        return (
+          <DeviceControlScreen 
+            navigation={navigationAdapter}
+            onNavigate={setCurrentScreen}
+            isDeviceOn={isDeviceOn}
+            setIsDeviceOn={setIsDeviceOn}
+            syncState={syncState}
+            setSyncState={setSyncState}
+            isWifiConnected={isPhoneConnected}
+            userId={userId}
+            deviceIp={esp32IP}
+          />
+        );
 
-            if (currentVolume > soundThreshold) {
-              const directionTag = isLeftSwitched ? 'left' : 'right';
-              const directionLabel = isLeftSwitched ? 'Left' : 'Right';
+      case 'devicePairing':
+        return (
+          <DevicePairingScreen 
+            navigation={navigationAdapter}
+            onNavigate={setCurrentScreen}
+            syncState={syncState}
+            setSyncState={setSyncState}
+            deviceIp={esp32IP}
+            setDeviceIp={setEsp32IP}
+            userId={userId}
+            onSelectDevice={(device) => {
+              setIsDeviceOn(true);
+              setSyncState('SUCCESS');
+              if (device?.ip_address) setEsp32IP(device.ip_address);
+            }}
+          />
+        );
 
-              // Push sound metadata alerts directly to your new clean notifications database table
-              await supabase.from('notifications').insert([
-                { 
-                  user_id: userId, 
-                  notification_type: 'sound_event', 
-                  title: `Sound from the ${directionLabel}`,
-                  message: `A clear sound event was detected coming from the ${directionTag} side microphone.`,
-                  metadata: directionTag
-                }
-              ]);
+      case 'notifications':
+        return (
+          <NotificationScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+            userId={userId} 
+          />
+        );
 
-              logSystemEvent(`Sound verified on ${directionLabel} side. Saved to notifications.`, "success");
-            }
-          }
-        }
-      } catch (err) {
-        console.log("Sound tracking loop skipped sample context frame due to network fluctuation.");
-      }
-    }, 1000); 
+      case 'alerts':
+      case 'alertLogs':
+        return (
+          <AlertsScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+            isWifiConnected={isPhoneConnected} 
+            syncState={syncState} 
+            userId={userId} 
+          />
+        );
 
-    return () => clearInterval(soundInterval);
-  }, [isDeviceOn, syncState, esp32IP, userId]);
+      case 'familyGroup':
+        return (
+          <FamilyGroupScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+            userId={userId} 
+          />
+        );
 
-  // View Route Mapping Router Stack
-  switch (currentScreen) {
-    case 'login':
-      return (
-        <LoginScreen 
-          onNavigate={setCurrentScreen} 
-          onLoginSuccess={(uid) => {
-            setUserId(uid); 
-            logSystemEvent("User secure session validated via database sync.", "info");
-            setCurrentScreen('dashboard');
-          }}
-        />
-      );
+      case 'groupManagement':
+        return (
+          <GroupManagementScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+            userId={userId} 
+          />
+        );
 
-    case 'register':
-      return <RegisterScreen onNavigate={setCurrentScreen} />;
+      case 'soundManual':
+        return (
+          <SoundManualScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+            userId={userId} 
+          />
+        );
 
-    case 'forgotPassword':
-      return <ForgotPasswordScreen onNavigate={setCurrentScreen} />;
+      case 'fullscreenMap':
+        return (
+          <FullscreenMapScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+          />
+        );
 
-    case 'dashboard':
-      return (
-        <DashboardScreen 
-          onNavigate={setCurrentScreen} 
-          isWifiConnected={isWifiConnected}
-          userId={userId} 
-        />
-      );
+      default:
+        return userId ? (
+          <DashboardScreen 
+            navigation={navigationAdapter}
+            onNavigate={setCurrentScreen} 
+            isPhoneConnected={isPhoneConnected}            
+            isDeviceConnected={syncState === 'SUCCESS'}    
+            isDeviceOn={isDeviceOn}                        
+            userId={userId} 
+          />
+        ) : (
+          <LoginScreen 
+            navigation={navigationAdapter} 
+            onNavigate={setCurrentScreen} 
+            onLoginSuccess={handleUserLoginEvent}
+          />
+        );
+    }
+  };
 
-    case 'settings':
-      return (
-        <SettingsScreen 
-          onNavigate={setCurrentScreen}
-          isDeviceOn={isDeviceOn}
-          setIsDeviceOn={async (value) => {
-            setIsDeviceOn(value);
-            logSystemEvent(`Device operation shifted manually to ${value ? 'ON' : 'OFF'}.`, value ? "success" : "info");
-            await supabase.from('devices').update({ is_active: value }).eq('user_id', userId);
-          }}
-          syncState={syncState}
-          setSyncState={(stateValue) => {
-            setSyncState(stateValue);
-            if (stateValue === 'SUCCESS') {
-              logSystemEvent("✅ Sonoband Hardware Handshake Linked Successfully!", "success");
-            }
-          }}
-          isWifiConnected={isWifiConnected}
-          userId={userId}
-          deviceIp={esp32IP}       // ⚡ ADDED: Shared state value pointer sent down
-          setDeviceIp={setEsp32IP} // ⚡ ADDED: Shared global hook state updater sent down
-        />
-      );
-
-    case 'notifications':
-      return (
-        <NotificationScreen 
-          onNavigate={setCurrentScreen} 
-          userId={userId}
-        />
-      );
-
-    case 'alerts':
-      return <AlertsScreen onNavigate={setCurrentScreen} isWifiConnected={isWifiConnected} syncState={syncState} userId={userId} />;
-
-    case 'activityLogs': 
-      return <ActivityLogsScreen onNavigate={setCurrentScreen} userId={userId} />;
-
-    default:
-      return <LoginScreen onNavigate={setCurrentScreen} />;
-  }
+  return (
+    <SafeAreaProvider style={styles.rootProvider}>
+      {renderScreen()}
+    </SafeAreaProvider>
+  );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f172a' },
+  rootProvider: { 
+    flex: 1, 
+    backgroundColor: '#0F172A' 
+  },
 });

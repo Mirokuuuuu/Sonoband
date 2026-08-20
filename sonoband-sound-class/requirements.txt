@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+librosa
+numpy
+scikit-learn
+joblib
+supabase
+python-multipart
+pyserial>=3.5
+supabase>=2.0.0
+joblib>=1.2.0
+scikit-learn>=1.2.0
+numpy>=1.24.0
+requests>=2.28.0

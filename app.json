@@ -15,14 +15,27 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
+      ],
+      "package": "com.anonymous.Sonoband"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-asset",
-      "expo-router"
-    ]
+      "expo-router",
+      "react-native-ble-plx"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "fcb51b05-2d30-4673-839e-8e1f6b3f688d"
+      }
+    }
   }
 }
