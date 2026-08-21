@@ -258,7 +258,8 @@ export default function App() {
             setDeviceIp={setEsp32IP}
             userId={userId}
             onSelectDevice={(device) => {
-              setIsDeviceOn(true);
+              // FIX: Explicitly enforce device state to OFF (false) upon pairing
+              setIsDeviceOn(false);
               setSyncState('SUCCESS');
               if (device?.ip_address) setEsp32IP(device.ip_address);
             }}

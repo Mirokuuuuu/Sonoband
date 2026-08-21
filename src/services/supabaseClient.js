@@ -22,8 +22,8 @@ export const logSystemActivity = async (userId, eventType, description) => {
       .insert([
         { 
           user_id: userId, 
-          event_type: eventType, 
-          description: description, 
+          action: eventType,      // Maps to 'action' column in audit_logs
+          details: description,   // Maps to 'details' column in audit_logs
           created_at: new Date().toISOString() 
         }
       ]);

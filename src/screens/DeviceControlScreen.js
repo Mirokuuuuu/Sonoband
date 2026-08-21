@@ -13,7 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { supabase, logSystemActivity } from '../services/supabaseClient';
 
 export default function DeviceControlScreen({ navigation, userId, selectedMacAddress, isDeviceOn, setIsDeviceOn }) {
-  const [isEnabled, setIsEnabled] = useState(isDeviceOn ?? true);
+  const [isEnabled, setIsEnabled] = useState(isDeviceOn ?? false);
   const [sensitivity, setSensitivity] = useState('narrow');
   const [vibrationIntensity, setVibrationIntensity] = useState('medium');
   const [saving, setSaving] = useState(false);
@@ -35,10 +35,10 @@ export default function DeviceControlScreen({ navigation, userId, selectedMacAdd
       const { data, error } = await query.maybeSingle();
 
       if (data && !error) {
-        setIsEnabled(data.is_on ?? true);
+        setIsEnabled(data.is_on ?? false);
         setSensitivity(data.sensitivity || 'narrow');
         setVibrationIntensity(data.vibration_intensity || 'medium');
-        if (setIsDeviceOn) setIsDeviceOn(data.is_on ?? true);
+        if (setIsDeviceOn) setIsDeviceOn(data.is_on ?? false);
       }
     } catch (err) {
       console.log('Fetching settings info:', err.message);
@@ -61,13 +61,22 @@ export default function DeviceControlScreen({ navigation, userId, selectedMacAdd
       };
 
       if (selectedMacAddress) {
-        payload.mac_address = selectedMacAddress;
+        payload.mac_address = selectedMacAddress.trim();
       }
 
-      // FIX: Target unique constraint 'mac_address' instead of composite 'user_id,mac_address'
-      const { error } = await supabase
-        .from('user_devices')
-        .upsert(payload, { onConflict: 'mac_address' });
+      let error;
+      if (selectedMacAddress) {
+        const res = await supabase
+          .from('user_devices')
+          .upsert(payload, { onConflict: 'mac_address' });
+        error = res.error;
+      } else {
+        const res = await supabase
+          .from('user_devices')
+          .update(payload)
+          .eq('user_id', userId);
+        error = res.error;
+      }
 
       if (error) throw error;
 
@@ -78,6 +87,7 @@ export default function DeviceControlScreen({ navigation, userId, selectedMacAdd
       );
 
     } catch (err) {
+      console.error('Save Settings Error:', err);
       Alert.alert("Sync Error", err.message || "Failed to update settings.");
     } finally {
       setSaving(false);

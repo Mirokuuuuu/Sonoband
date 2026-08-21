@@ -17,7 +17,9 @@ export default function DevicePairingScreen({
   route, 
   userId: propUserId, 
   onSelectDevice,
+  syncState,
   setSyncState,
+  deviceIp,
   setDeviceIp 
 }) {
   const [devices, setDevices] = useState([]);
@@ -40,6 +42,7 @@ export default function DevicePairingScreen({
       }
     };
     loadUserId();
+    handleScanDevices();
   }, []);
 
   const handleScanDevices = async () => {
@@ -53,13 +56,12 @@ export default function DevicePairingScreen({
 
       if (error) throw error;
 
-      console.log('Found devices in database:', data);
       setDevices(data || []);
     } catch (err) {
       console.error('Scan error:', err);
       Alert.alert(
         'Unable to Search Devices',
-        'We couldn\'t look for available devices. Please check your internet connection and try again.'
+        'We couldn\'t find any available devices right now. Please make sure your device is powered on and connected to Wi-Fi.'
       );
     } finally {
       setLoading(false);
@@ -76,28 +78,34 @@ export default function DevicePairingScreen({
 
       if (!isValidUserId(rawUserId)) {
         Alert.alert(
-          'Session Expired',
-          'Please sign out and log back into your account to connect a device.'
+          'Please Sign In Again',
+          'Your session has ended. Please log out and log back into your account to connect your device.'
         );
         return;
       }
 
       const targetUserId = String(rawUserId).trim();
-      const targetMac = device.mac_address ? device.mac_address.trim() : '';
 
-      const { data, error } = await supabase
+      let query = supabase
         .from('user_devices')
         .update({ 
           user_id: targetUserId, 
-          is_on: true 
-        })
-        .ilike('mac_address', targetMac)
-        .select();
+          is_on: false,
+          last_seen: new Date().toISOString()
+        });
 
-      if (error || !data || data.length === 0) {
+      if (device.id) {
+        query = query.eq('id', device.id);
+      } else if (device.mac_address) {
+        query = query.eq('mac_address', device.mac_address.trim());
+      }
+
+      const { error } = await query.select();
+
+      if (error) {
         Alert.alert(
-          'Pairing Failed',
-          'We couldn\'t connect to this device. Please make sure the device is turned on and try again.'
+          'Connection Failed',
+          'We couldn\'t pair with this device. Please make sure your Wi-Fi is working and try again.'
         );
         return;
       }
@@ -106,7 +114,12 @@ export default function DevicePairingScreen({
       if (typeof setDeviceIp === 'function' && device.ip_address) setDeviceIp(device.ip_address);
       if (onSelectDevice) onSelectDevice(device);
 
-      Alert.alert('Device Connected', `Successfully paired with ${device.device_name || 'SonoBand Device'}.`);
+      handleScanDevices();
+
+      Alert.alert(
+        'Device Connected!', 
+        `Successfully paired with ${device.device_name || 'SonoBand Device'}. Your band is currently switched OFF.`
+      );
       
       if (navigation?.navigate) {
         navigation.navigate('Dashboard');
@@ -116,8 +129,63 @@ export default function DevicePairingScreen({
     } catch (err) {
       console.error('Connection Exception:', err);
       Alert.alert(
-        'Something Went Wrong',
-        'An unexpected error occurred while connecting. Please restart the app and try again.'
+        'Connection Error',
+        'Something unexpected happened while connecting. Please try again.'
+      );
+    }
+  };
+
+  const handleDisconnectDevice = (device) => {
+    Alert.alert(
+      'Disconnect Device',
+      `Do you want to disconnect from ${device.device_name || 'this device'}?`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Disconnect',
+          style: 'destructive',
+          onPress: () => confirmDisconnect(device),
+        },
+      ],
+      { cancelable: true }
+    );
+  };
+
+  const confirmDisconnect = async (device) => {
+    try {
+      let query = supabase
+        .from('user_devices')
+        .update({ 
+          user_id: null, 
+          is_on: false 
+        });
+
+      if (device.id) {
+        query = query.eq('id', device.id);
+      } else if (device.mac_address) {
+        query = query.eq('mac_address', device.mac_address.trim());
+      }
+
+      await query;
+
+      if (typeof setSyncState === 'function') setSyncState(null);
+      if (typeof setDeviceIp === 'function') setDeviceIp(null);
+      if (onSelectDevice) onSelectDevice(null);
+
+      handleScanDevices();
+
+      Alert.alert(
+        'Disconnected',
+        'You have successfully disconnected from your device.'
+      );
+    } catch (err) {
+      console.error('Disconnect error:', err);
+      Alert.alert(
+        'Disconnect Failed',
+        'We couldn\'t disconnect your device right now. Please try again.'
       );
     }
   };
@@ -127,27 +195,57 @@ export default function DevicePairingScreen({
     const lastSeenMs = new Date(lastSeen).getTime();
     const nowMs = new Date().getTime();
     const diffInSeconds = Math.abs(nowMs - lastSeenMs) / 1000;
-    return diffInSeconds < 60;
+    return diffInSeconds < 300;
   };
 
   const renderDeviceItem = ({ item }) => {
     const online = isOnline(item.last_seen);
+    
+    const isUserConnected = (syncState === 'SUCCESS') && (
+      (isValidUserId(activeUserId) && String(item.user_id) === String(activeUserId)) ||
+      (deviceIp && item.ip_address === deviceIp)
+    );
 
     return (
       <TouchableOpacity
-        style={styles.deviceCard}
-        onPress={() => handleConnectDevice(item)}
+        style={[styles.deviceCard, isUserConnected && styles.connectedCard]}
+        onPress={() => {
+          if (isUserConnected) {
+            handleDisconnectDevice(item);
+          } else {
+            handleConnectDevice(item);
+          }
+        }}
+        onLongPress={() => {
+          if (isUserConnected) {
+            handleDisconnectDevice(item);
+          }
+        }}
+        delayLongPress={500}
       >
-        <Ionicons name="hardware-chip-outline" size={32} color="#38BDF8" />
+        <Ionicons name="hardware-chip-outline" size={32} color={isUserConnected ? "#38BDF8" : "#94A3B8"} />
+        
         <View style={styles.deviceInfo}>
           <Text style={styles.deviceName}>
             {item.device_name || 'SonoBand Device'}
           </Text>
           <Text style={styles.deviceMeta}>MAC: {item.mac_address || 'Unavailable'}</Text>
           <Text style={styles.deviceMeta}>IP: {item.ip_address || 'Searching...'}</Text>
+          {isUserConnected && (
+            <Text style={styles.longPressHint}>Tap or hold to disconnect</Text>
+          )}
         </View>
-        <View style={[styles.statusBadge, { backgroundColor: online ? '#22C55E' : '#64748B' }]}>
-          <Text style={styles.statusText}>{online ? 'ONLINE' : 'OFFLINE'}</Text>
+
+        <View style={styles.badgeContainer}>
+          {isUserConnected ? (
+            <View style={[styles.statusBadge, { backgroundColor: '#0284C7' }]}>
+              <Text style={styles.statusText}>CONNECTED</Text>
+            </View>
+          ) : (
+            <View style={[styles.statusBadge, { backgroundColor: online ? '#22C55E' : '#64748B' }]}>
+              <Text style={styles.statusText}>{online ? 'ONLINE' : 'OFFLINE'}</Text>
+            </View>
+          )}
         </View>
       </TouchableOpacity>
     );
@@ -171,7 +269,7 @@ export default function DevicePairingScreen({
           renderItem={renderDeviceItem}
           ListEmptyComponent={
             <Text style={styles.emptyText}>
-              Tap "Refresh Devices" below to search for available devices.
+              No devices found. Make sure your device is plugged in and tap "Refresh Devices".
             </Text>
           }
         />
@@ -196,10 +294,25 @@ const styles = StyleSheet.create({
   backButton: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
   backText: { color: '#38BDF8', fontSize: 16, fontWeight: '600', marginLeft: 8 },
   title: { fontSize: 22, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 20 },
-  deviceCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1E293B', padding: 16, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: '#334155' },
+  deviceCard: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    backgroundColor: '#1E293B', 
+    padding: 16, 
+    borderRadius: 12, 
+    marginBottom: 10, 
+    borderWidth: 1, 
+    borderColor: '#334155' 
+  },
+  connectedCard: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0F2942'
+  },
   deviceInfo: { marginLeft: 12, flex: 1 },
   deviceName: { fontSize: 16, fontWeight: 'bold', color: '#F8FAFC' },
   deviceMeta: { fontSize: 12, color: '#94A3B8', marginTop: 2 },
+  longPressHint: { fontSize: 10, color: '#38BDF8', marginTop: 4, fontStyle: 'italic' },
+  badgeContainer: { alignItems: 'flex-end' },
   statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   statusText: { color: '#FFF', fontSize: 10, fontWeight: 'bold' },
   emptyText: { color: '#94A3B8', textAlign: 'center', marginTop: 30, paddingHorizontal: 10 },

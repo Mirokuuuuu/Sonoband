@@ -66,12 +66,11 @@ export default function DashboardScreen({
   const [batteryLevel, setBatteryLevel] = useState(null);
   const [showTutorial, setShowTutorial] = useState(false);
   const [activeDeviceCount, setActiveDeviceCount] = useState(0);
-  const [devicePower, setDevicePower] = useState(Boolean(propIsDeviceOn));
+  
+  // Power defaults strictly to OFF (false) until toggled by user
+  const [devicePower, setDevicePower] = useState(false);
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
-
-  useEffect(() => {
-    setDevicePower(Boolean(propIsDeviceOn));
-  }, [propIsDeviceOn]);
+  const [deviceIp, setDeviceIp] = useState(null);
 
   const checkProfileCompletion = async () => {
     if (!userId) return;
@@ -105,16 +104,25 @@ export default function DashboardScreen({
         }
       }
 
-      // Query user_devices table for device status and ID
+      // Fetch paired device without triggering auto-connection or automatic HTTP requests
       const { data: deviceData } = await supabase
         .from('user_devices')
-        .select('id, mac_address, last_seen, is_on')
+        .select('id, mac_address, last_seen, is_on, ip_address')
         .eq('user_id', String(userId).trim());
       
       if (deviceData && deviceData.length > 0) {
+        const dev = deviceData[0];
         setActiveDeviceCount(deviceData.length);
-        setCurrentDeviceId(deviceData[0].id);
-        setDevicePower(Boolean(deviceData[0].is_on));
+        setCurrentDeviceId(dev.id);
+        setDeviceIp(dev.ip_address);
+
+        // Explicitly set default power state to OFF (false)
+        setDevicePower(false);
+        if (typeof setIsDeviceOn === 'function') setIsDeviceOn(false);
+      } else {
+        setActiveDeviceCount(0);
+        setCurrentDeviceId(null);
+        setDeviceIp(null);
       }
 
     } catch (err) {
@@ -145,44 +153,52 @@ export default function DashboardScreen({
 
   const handleTogglePower = async () => {
     if (!currentDeviceId && !userId) {
-      Alert.alert('No Device Paired', 'Please pair a device first before toggling power.');
+      Alert.alert('No Device Paired', 'Please pair a device on the Device Pairing page before toggling power.');
       return;
     }
 
     const newPowerState = !devicePower;
 
-    // 1. Instantly update local screen state
+    // 1. Immediately update UI state
     setDevicePower(newPowerState);
     if (typeof setIsDeviceOn === 'function') setIsDeviceOn(newPowerState);
 
     try {
-      // 2. Query device IP from database
-      const { data: deviceData } = await supabase
-        .from('user_devices')
-        .select('id, ip_address')
-        .eq('user_id', String(userId).trim())
-        .maybeSingle();
+      // 2. Resolve hardware IP address if missing from state
+      let targetIp = deviceIp;
+      if (!targetIp) {
+        const { data: devFetch } = await supabase
+          .from('user_devices')
+          .select('ip_address')
+          .eq('user_id', String(userId).trim())
+          .maybeSingle();
+        targetIp = devFetch?.ip_address;
+        if (targetIp) setDeviceIp(targetIp);
+      }
 
-      const deviceIp = deviceData?.ip_address;
-
-      // 3. Send direct command to device hardware over local network if reachable
-      if (deviceIp) {
+      // 3. Send HTTP request directly to hardware endpoint
+      if (targetIp) {
         try {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 3000);
 
-          await fetch(`http://${deviceIp}/power?state=${newPowerState ? 'on' : 'off'}`, {
+          await fetch(`http://${targetIp}/power?state=${newPowerState ? 'on' : 'off'}`, {
             method: 'GET',
             signal: controller.signal
           });
           clearTimeout(timeoutId);
         } catch (networkErr) {
-          console.warn('Direct HTTP fetch to hardware failed or timed out:', networkErr);
+          console.warn('Direct network request to device failed or timed out:', networkErr);
         }
       }
 
-      // 4. Save state change in Supabase database
-      let query = supabase.from('user_devices').update({ is_on: newPowerState });
+      // 4. Update ONLY the 'is_on' and 'last_seen' columns in Supabase matching your schema
+      let query = supabase
+        .from('user_devices')
+        .update({ 
+          is_on: newPowerState,
+          last_seen: new Date().toISOString()
+        });
 
       if (currentDeviceId) {
         query = query.eq('id', currentDeviceId);
@@ -193,9 +209,11 @@ export default function DashboardScreen({
       const { error } = await query;
 
       if (error) {
+        console.error('Database Sync Error:', error);
+        // Rollback state on error
         setDevicePower(!newPowerState);
         if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
-        Alert.alert('Power Error', 'Unable to change device power state in database.');
+        Alert.alert('Sync Error', 'Could not update power state in database.');
       }
     } catch (err) {
       console.error('Power toggle exception:', err);
