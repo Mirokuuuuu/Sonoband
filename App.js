@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo'; 
-import { supabase } from './src/services/supabaseClient';
+import { supabase, logSystemActivity } from './src/services/supabaseClient';
 
 // Authentication Screens
 import LoginScreen from './src/screens/LoginScreen';
@@ -76,32 +76,61 @@ export default function App() {
     }
   };
 
-  // Centralized login event logger
-  const handleUserLoginEvent = async (uid) => {
-    setUserId(uid);
-    logSystemEvent("User session validated.", "info");
+  // Helper function to convert session user into integer ID from custom 'users' table
+  const fetchNumericUserId = async (authUser) => {
+    if (!authUser) {
+      setUserId(null);
+      return;
+    }
 
     try {
-      const { data: userData } = await supabase
+      // Check custom users table by email
+      const { data: customUser } = await supabase
         .from('users')
-        .select('name, email, role')
-        .eq('id', uid)
+        .select('id')
+        .eq('email', authUser.email)
         .maybeSingle();
 
-      const { error: insertErr } = await supabase.from('audit_logs').insert([
-        {
-          user_id: uid,
-          user_name: userData?.name || userData?.email || 'User',
-          user_email: userData?.email || '',
-          role: userData?.role || 'user',
-          action: 'Login',
-          details: 'User logged in to application',
-          ip_address: Platform.OS === 'ios' ? 'iOS Device' : 'Android Device',
-          created_at: new Date().toISOString()
-        }
-      ]);
+      if (customUser?.id) {
+        setUserId(Number(customUser.id));
+      } else {
+        const parsed = Number(authUser.id);
+        setUserId(!isNaN(parsed) ? parsed : null);
+      }
+    } catch (err) {
+      console.error('Failed to resolve custom integer user ID:', err);
+    }
+  };
 
-      if (insertErr) console.log('Audit log write skipped:', insertErr.message);
+  // Centralized login event logger
+  const handleUserLoginEvent = async (uid) => {
+    let numericId = null;
+
+    try {
+      // Query custom users table for integer ID
+      const { data: userData } = await supabase
+        .from('users')
+        .select('id, name, email, role')
+        .or(`id.eq.${isNaN(Number(uid)) ? -1 : Number(uid)},email.eq.${uid}`)
+        .maybeSingle();
+
+      if (userData?.id) {
+        numericId = Number(userData.id);
+      } else if (!isNaN(Number(uid))) {
+        numericId = Number(uid);
+      }
+
+      setUserId(numericId);
+      logSystemEvent("User session validated.", "info");
+
+      if (numericId) {
+        await logSystemActivity(numericId, 'Login', 'User logged in to application', {
+          userName: userData?.name || userData?.email || 'User',
+          userEmail: userData?.email || '',
+          role: userData?.role || 'user',
+          ipAddress: Platform.OS === 'ios' ? 'iOS Device' : 'Android Device'
+        });
+      }
     } catch (err) {
       console.log('Login event logging skipped:', err.message);
     }
@@ -112,15 +141,11 @@ export default function App() {
   // Auth Listener
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setUserId(session.user.id);
-      }
+      fetchNumericUserId(session?.user);
     }).catch(() => {});
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        setUserId(session.user.id);
-      }
+      fetchNumericUserId(session?.user);
     });
 
     return () => subscription.unsubscribe();
@@ -258,10 +283,13 @@ export default function App() {
             setDeviceIp={setEsp32IP}
             userId={userId}
             onSelectDevice={(device) => {
-              // FIX: Explicitly enforce device state to OFF (false) upon pairing
               setIsDeviceOn(false);
               setSyncState('SUCCESS');
               if (device?.ip_address) setEsp32IP(device.ip_address);
+            }}
+            onDisconnectDevice={() => {
+              setIsDeviceOn(false);
+              setSyncState('IDLE');
             }}
           />
         );

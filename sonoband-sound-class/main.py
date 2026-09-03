@@ -2,7 +2,9 @@ import socket
 import json
 import uuid
 import time
+from threading import Thread
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from supabase import create_client, Client
 
 SUPABASE_URL = "https://qdmwobrwokpczqwezjzs.supabase.co"  
@@ -11,18 +13,51 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 UDP_IP = "0.0.0.0" 
 UDP_PORT = 8888
+HTTP_PORT = 5000
 
-def is_valid_uuid(val):
-    try:
-        if not val:
-            return False
-        uuid.UUID(str(val))
-        return True
-    except (ValueError, TypeError):
-        return False
+# Stores live shaking-hands devices in memory ONLY: { mac_address: { ... } }
+ACTIVE_DISCOVERED_DEVICES = {}
+
+def clean_stale_devices():
+    """Removes devices from local memory if no ping received in 10 seconds."""
+    while True:
+        now = time.time()
+        stale_macs = [mac for mac, info in ACTIVE_DISCOVERED_DEVICES.items() if now - info['last_ping'] > 10]
+        for mac in stale_macs:
+            del ACTIVE_DISCOVERED_DEVICES[mac]
+            print(f"[DISCOVERY] ESP32 {mac} lost power / disconnected. Removed from search.")
+        time.sleep(3)
+
+class DiscoveryAPI(BaseHTTPRequestHandler):
+    """Local HTTP endpoint for React Native app to discover live handshakes."""
+    def do_GET(self):
+        if self.path == '/discovered-devices':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            # Format active devices for mobile app
+            devices_list = []
+            for mac, data in ACTIVE_DISCOVERED_DEVICES.items():
+                devices_list.append({
+                    "mac_address": mac,
+                    "ip_address": data['ip_address'],
+                    "device_name": data['device_name'],
+                    "is_active": True
+                })
+            
+            self.wfile.write(json.dumps(devices_list).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_http_server():
+    server = HTTPServer(('0.0.0.0', HTTP_PORT), DiscoveryAPI)
+    print(f"[HTTP] Discovery API running on port {HTTP_PORT}...")
+    server.serve_forever()
 
 def get_existing_device(mac_address):
-    """Fetches the existing device record from user_devices to retain settings and user_id."""
     try:
         res = supabase.from_('user_devices') \
             .select('user_id, is_on') \
@@ -40,51 +75,45 @@ def start_continuous_listener():
     
     print(f"[SERVER] Started. Listening constantly for ESP32 broadcasts on port {UDP_PORT}...")
 
+    # Start background threads
+    Thread(target=clean_stale_devices, daemon=True).start()
+    Thread(target=start_http_server, daemon=True).start()
+
     while True:
         try:
-            # 1. Receive UDP broadcast from ESP32
             data, addr = sock.recvfrom(1024)
             data_str = data.decode('utf-8')
             payload = json.loads(data_str)
             
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Received from {addr[0]}: {payload}")
-
             mac_address = payload.get("mac_address", "UNKNOWN")
             incoming_ip = payload.get("ip_address", addr[0])
-            raw_user_id = payload.get("user_id", "")
 
             if mac_address != "UNKNOWN":
-                current_time = datetime.now(timezone.utc).isoformat()
-                
-                # Check if device is already registered in user_devices
-                existing_device = get_existing_device(mac_address)
-                existing_user_id = existing_device.get('user_id') if existing_device else None
-                desired_power_state = existing_device.get('is_on', False) if existing_device else False
-
-                # Prepare upsert payload
-                update_data = {
-                    'mac_address': mac_address,
+                # 1. Update in-memory discovery state (NO SUPABASE INSERT HERE)
+                ACTIVE_DISCOVERED_DEVICES[mac_address] = {
                     'ip_address': incoming_ip,
-                    'last_seen': current_time,
-                    'device_name': payload.get('device', 'SonoBand Device')
+                    'device_name': payload.get('device', 'SonoBand Device'),
+                    'last_ping': time.time()
                 }
+
+                # 2. Check if device has ALREADY been paired in database by the mobile app
+                existing_device = get_existing_device(mac_address)
                 
-                # Assign valid UUID (from incoming packet or existing DB record)
-                if is_valid_uuid(raw_user_id):
-                    update_data['user_id'] = raw_user_id
-                elif existing_user_id:
-                    update_data['user_id'] = existing_user_id
+                if existing_device and existing_device.get('user_id'):
+                    # Device is paired: update last_seen heartbeat
+                    current_time = datetime.now(timezone.utc).isoformat()
+                    supabase.from_('user_devices').update({
+                        'ip_address': incoming_ip,
+                        'last_seen': current_time
+                    }).eq('mac_address', mac_address).execute()
 
-                # Only attempt database update if we have a valid user_id or device already exists
-                if 'user_id' in update_data or existing_device is not None:
-                    supabase.from_('user_devices').upsert(
-                        update_data, 
-                        on_conflict='mac_address'
-                    ).execute()
+                    desired_power_state = existing_device.get('is_on', False)
+                    existing_user_id = existing_device.get('user_id')
                 else:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Notice: Device {mac_address} not yet paired to a user in app.")
+                    desired_power_state = False
+                    existing_user_id = ""
 
-                # Reply back to ESP32 with current power state from DB
+                # 3. Respond back to ESP32
                 desired_power = "on" if desired_power_state else "off"
                 cmd_payload = json.dumps({
                     "type": "ping",

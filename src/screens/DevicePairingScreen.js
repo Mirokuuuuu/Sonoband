@@ -4,319 +4,408 @@ import {
   Text,
   View,
   TouchableOpacity,
+  SafeAreaView,
+  StatusBar,
   FlatList,
+  Alert,
   ActivityIndicator,
-  Alert
+  Modal,
+  TextInput,
+  Platform,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../services/supabaseClient';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { supabase, logSystemActivity } from '../services/supabaseClient';
 
-export default function DevicePairingScreen({ 
-  navigation, 
-  route, 
-  userId: propUserId, 
-  onSelectDevice,
+export default function DevicePairingScreen({
+  navigation,
+  onNavigate,
   syncState,
   setSyncState,
   deviceIp,
-  setDeviceIp 
+  setDeviceIp,
+  userId,
+  onSelectDevice,
+  onDisconnectDevice,
 }) {
-  const [devices, setDevices] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [activeUserId, setActiveUserId] = useState(
-    propUserId || route?.params?.userId || null
-  );
+  const [isScanning, setIsScanning] = useState(false);
+  const [discoveredDevices, setDiscoveredDevices] = useState([]);
+  const [pairedDevices, setPairedDevices] = useState([]);
+  const [isRegisterModalVisible, setIsRegisterModalVisible] = useState(false);
+  
+  // Registration Form States
+  const [deviceNameInput, setDeviceNameInput] = useState('');
+  const [macAddressInput, setMacAddressInput] = useState('');
+  const [ipAddressInput, setIpAddressInput] = useState(deviceIp || '192.168.1.15');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const isValidUserId = (id) => {
-    return id !== null && id !== undefined && String(id).trim() !== '' && String(id) !== 'undefined' && String(id) !== 'null';
-  };
+  const isValidUserId = (id) => typeof id === 'string' && id.trim().length > 0;
 
   useEffect(() => {
-    const loadUserId = async () => {
-      if (!isValidUserId(activeUserId)) {
-        const storedId = await AsyncStorage.getItem('user_id');
-        if (isValidUserId(storedId)) {
-          setActiveUserId(storedId);
-        }
-      }
-    };
-    loadUserId();
-    handleScanDevices();
-  }, []);
+    fetchPairedDevices();
+  }, [userId]);
 
-  const handleScanDevices = async () => {
-    if (loading) return;
+  const fetchPairedDevices = async () => {
+    if (!isValidUserId(userId)) return;
 
-    setLoading(true);
     try {
       const { data, error } = await supabase
-        .from('user_devices')
-        .select('*');
+        .from('devices')
+        .select('*')
+        .eq('user_id', userId);
+
+      if (error) throw error;
+      setPairedDevices(data || []);
+    } catch (err) {
+      console.error('Fetch Paired Devices Error:', err.message);
+    }
+  };
+
+  const handleScanDevices = async () => {
+    setIsScanning(true);
+    setDiscoveredDevices([]);
+
+    try {
+      const targetIp = deviceIp || '192.168.1.15';
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+      const response = await fetch(`http://${targetIp}:5000/discovered-devices`, {
+        signal: controller.signal,
+      }).catch(() => null);
+
+      clearTimeout(timeoutId);
+
+      if (response && response.ok) {
+        const data = await response.json();
+        setDiscoveredDevices(data.devices || []);
+      } else {
+        // Fallback: search registered devices in Supabase
+        const { data } = await supabase.from('devices').select('*').limit(5);
+        setDiscoveredDevices(data || []);
+      }
+    } catch (err) {
+      console.log('Scan warning:', err.message);
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handlePairDevice = async (device) => {
+    if (!isValidUserId(userId)) {
+      Alert.alert('Authentication Error', 'Invalid user session. Please log in again.');
+      return;
+    }
+
+    try {
+      setSyncState('SYNCING');
+
+      const { data, error } = await supabase
+        .from('devices')
+        .upsert([
+          {
+            user_id: userId,
+            device_name: device.device_name || device.name || 'Guardian Node',
+            mac_address: device.mac_address || '00:00:00:00:00:00',
+            ip_address: device.ip_address || deviceIp,
+            status: 'ONLINE',
+            last_sync: new Date().toISOString(),
+          },
+        ])
+        .select();
 
       if (error) throw error;
 
-      setDevices(data || []);
-    } catch (err) {
-      console.error('Scan error:', err);
-      Alert.alert(
-        'Unable to Search Devices',
-        'We couldn\'t find any available devices right now. Please make sure your device is powered on and connected to Wi-Fi.'
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleConnectDevice = async (device) => {
-    try {
-      let rawUserId = activeUserId;
-
-      if (!isValidUserId(rawUserId)) {
-        rawUserId = await AsyncStorage.getItem('user_id');
-      }
-
-      if (!isValidUserId(rawUserId)) {
-        Alert.alert(
-          'Please Sign In Again',
-          'Your session has ended. Please log out and log back into your account to connect your device.'
-        );
-        return;
-      }
-
-      const targetUserId = String(rawUserId).trim();
-
-      let query = supabase
-        .from('user_devices')
-        .update({ 
-          user_id: targetUserId, 
-          is_on: false,
-          last_seen: new Date().toISOString()
-        });
-
-      if (device.id) {
-        query = query.eq('id', device.id);
-      } else if (device.mac_address) {
-        query = query.eq('mac_address', device.mac_address.trim());
-      }
-
-      const { error } = await query.select();
-
-      if (error) {
-        Alert.alert(
-          'Connection Failed',
-          'We couldn\'t pair with this device. Please make sure your Wi-Fi is working and try again.'
-        );
-        return;
-      }
-
-      if (typeof setSyncState === 'function') setSyncState('SUCCESS');
-      if (typeof setDeviceIp === 'function' && device.ip_address) setDeviceIp(device.ip_address);
-      if (onSelectDevice) onSelectDevice(device);
-
-      handleScanDevices();
-
-      Alert.alert(
-        'Device Connected!', 
-        `Successfully paired with ${device.device_name || 'SonoBand Device'}. Your band is currently switched OFF.`
-      );
+      await logSystemActivity(userId, 'PAIR_DEVICE', `Paired device: ${device.device_name || 'Guardian Node'}`);
       
-      if (navigation?.navigate) {
-        navigation.navigate('Dashboard');
-      } else if (navigation?.goBack) {
-        navigation.goBack();
+      if (onSelectDevice) {
+        onSelectDevice(device);
+      } else {
+        setSyncState('SUCCESS');
       }
+
+      Alert.alert('Success', 'Device paired successfully!');
+      fetchPairedDevices();
     } catch (err) {
-      console.error('Connection Exception:', err);
-      Alert.alert(
-        'Connection Error',
-        'Something unexpected happened while connecting. Please try again.'
-      );
+      setSyncState('FAILED');
+      Alert.alert('Pairing Failed', err.message);
     }
   };
 
-  const handleDisconnectDevice = (device) => {
-    Alert.alert(
-      'Disconnect Device',
-      `Do you want to disconnect from ${device.device_name || 'this device'}?`,
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
+  const handleDisconnectDevice = async (deviceId) => {
+    Alert.alert('Unpair Device', 'Are you sure you want to remove this device?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Unpair',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const { error } = await supabase.from('devices').delete().eq('id', deviceId);
+            if (error) throw error;
+
+            if (onDisconnectDevice) {
+              onDisconnectDevice();
+            } else {
+              setSyncState('IDLE');
+            }
+
+            await logSystemActivity(userId, 'UNPAIR_DEVICE', `Unpaired device ID: ${deviceId}`);
+            Alert.alert('Disconnected', 'Device successfully removed.');
+            fetchPairedDevices();
+          } catch (err) {
+            Alert.alert('Error', err.message);
+          }
         },
-        {
-          text: 'Disconnect',
-          style: 'destructive',
-          onPress: () => confirmDisconnect(device),
-        },
-      ],
-      { cancelable: true }
-    );
+      },
+    ]);
   };
 
-  const confirmDisconnect = async (device) => {
+  const handleManualRegister = async () => {
+    if (!deviceNameInput.trim()) {
+      Alert.alert('Input Error', 'Please enter a device name.');
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
-      let query = supabase
-        .from('user_devices')
-        .update({ 
-          user_id: null, 
-          is_on: false 
-        });
+      const { error } = await supabase.from('devices').insert([
+        {
+          user_id: userId,
+          device_name: deviceNameInput.trim(),
+          mac_address: macAddressInput.trim() || 'UNKNOWN_MAC',
+          ip_address: ipAddressInput.trim() || deviceIp,
+          status: 'OFFLINE',
+          last_sync: new Date().toISOString(),
+        },
+      ]);
 
-      if (device.id) {
-        query = query.eq('id', device.id);
-      } else if (device.mac_address) {
-        query = query.eq('mac_address', device.mac_address.trim());
-      }
+      if (error) throw error;
 
-      await query;
-
-      if (typeof setSyncState === 'function') setSyncState(null);
-      if (typeof setDeviceIp === 'function') setDeviceIp(null);
-      if (onSelectDevice) onSelectDevice(null);
-
-      handleScanDevices();
-
-      Alert.alert(
-        'Disconnected',
-        'You have successfully disconnected from your device.'
-      );
+      Alert.alert('Success', 'Device registered successfully!');
+      setIsRegisterModalVisible(false);
+      setDeviceNameInput('');
+      setMacAddressInput('');
+      fetchPairedDevices();
     } catch (err) {
-      console.error('Disconnect error:', err);
-      Alert.alert(
-        'Disconnect Failed',
-        'We couldn\'t disconnect your device right now. Please try again.'
-      );
+      Alert.alert('Registration Failed', err.message);
+    } finally {
+      setIsSubmitting(false);
     }
-  };
-
-  const isOnline = (lastSeen) => {
-    if (!lastSeen) return false;
-    const lastSeenMs = new Date(lastSeen).getTime();
-    const nowMs = new Date().getTime();
-    const diffInSeconds = Math.abs(nowMs - lastSeenMs) / 1000;
-    return diffInSeconds < 300;
-  };
-
-  const renderDeviceItem = ({ item }) => {
-    const online = isOnline(item.last_seen);
-    
-    const isUserConnected = (syncState === 'SUCCESS') && (
-      (isValidUserId(activeUserId) && String(item.user_id) === String(activeUserId)) ||
-      (deviceIp && item.ip_address === deviceIp)
-    );
-
-    return (
-      <TouchableOpacity
-        style={[styles.deviceCard, isUserConnected && styles.connectedCard]}
-        onPress={() => {
-          if (isUserConnected) {
-            handleDisconnectDevice(item);
-          } else {
-            handleConnectDevice(item);
-          }
-        }}
-        onLongPress={() => {
-          if (isUserConnected) {
-            handleDisconnectDevice(item);
-          }
-        }}
-        delayLongPress={500}
-      >
-        <Ionicons name="hardware-chip-outline" size={32} color={isUserConnected ? "#38BDF8" : "#94A3B8"} />
-        
-        <View style={styles.deviceInfo}>
-          <Text style={styles.deviceName}>
-            {item.device_name || 'SonoBand Device'}
-          </Text>
-          <Text style={styles.deviceMeta}>MAC: {item.mac_address || 'Unavailable'}</Text>
-          <Text style={styles.deviceMeta}>IP: {item.ip_address || 'Searching...'}</Text>
-          {isUserConnected && (
-            <Text style={styles.longPressHint}>Tap or hold to disconnect</Text>
-          )}
-        </View>
-
-        <View style={styles.badgeContainer}>
-          {isUserConnected ? (
-            <View style={[styles.statusBadge, { backgroundColor: '#0284C7' }]}>
-              <Text style={styles.statusText}>CONNECTED</Text>
-            </View>
-          ) : (
-            <View style={[styles.statusBadge, { backgroundColor: online ? '#22C55E' : '#64748B' }]}>
-              <Text style={styles.statusText}>{online ? 'ONLINE' : 'OFFLINE'}</Text>
-            </View>
-          )}
-        </View>
-      </TouchableOpacity>
-    );
   };
 
   return (
-    <View style={styles.container}>
-      <TouchableOpacity style={styles.backButton} onPress={() => navigation && navigation.goBack()}>
-        <Ionicons name="arrow-back" size={22} color="#38BDF8" />
-        <Text style={styles.backText}>Back</Text>
-      </TouchableOpacity>
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
-      <Text style={styles.title}>Paired Devices</Text>
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => (navigation ? navigation.goBack() : onNavigate('dashboard'))}
+        >
+          <MaterialCommunityIcons name="arrow-left" size={24} color="#FFF" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Device Pairing</Text>
+        <TouchableOpacity style={styles.addButton} onPress={() => setIsRegisterModalVisible(true)}>
+          <MaterialCommunityIcons name="plus" size={24} color="#38BDF8" />
+        </TouchableOpacity>
+      </View>
 
-      {loading ? (
-        <ActivityIndicator size="large" color="#38BDF8" style={{ marginTop: 20 }} />
-      ) : (
-        <FlatList
-          data={devices}
-          keyExtractor={(item, index) => item?.id ? String(item.id) : item?.mac_address || String(index)}
-          renderItem={renderDeviceItem}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>
-              No devices found. Make sure your device is plugged in and tap "Refresh Devices".
+      <View style={styles.content}>
+        {/* Connection Status Card */}
+        <View style={styles.statusCard}>
+          <MaterialCommunityIcons
+            name={syncState === 'SUCCESS' ? 'link' : 'link-off'}
+            size={32}
+            color={syncState === 'SUCCESS' ? '#4ADE80' : '#94A3B8'}
+          />
+          <View style={styles.statusTextContainer}>
+            <Text style={styles.statusTitle}>
+              {syncState === 'SUCCESS' ? 'Device Connected' : 'No Active Connection'}
             </Text>
-          }
-        />
-      )}
+            <Text style={styles.statusSubtitle}>Target IP: {deviceIp}</Text>
+          </View>
+        </View>
 
-      <TouchableOpacity 
-        style={[styles.scanBtn, loading && styles.disabledBtn]} 
-        onPress={handleScanDevices}
-        disabled={loading}
-      >
-        <Ionicons name="refresh-outline" size={20} color="#0F172A" />
-        <Text style={styles.scanBtnText}>
-          {loading ? 'Searching...' : 'Refresh Devices'}
-        </Text>
-      </TouchableOpacity>
-    </View>
+        {/* Action Controls */}
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            style={[styles.scanButton, isScanning && styles.disabledButton]}
+            onPress={handleScanDevices}
+            disabled={isScanning}
+          >
+            {isScanning ? (
+              <ActivityIndicator color="#FFF" />
+            ) : (
+              <>
+                <MaterialCommunityIcons name="radar" size={20} color="#FFF" />
+                <Text style={styles.scanButtonText}>Scan Local Network</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* Discovered Section */}
+        {discoveredDevices.length > 0 && (
+          <View style={styles.sectionContainer}>
+            <Text style={styles.sectionTitle}>Discovered Devices</Text>
+            {discoveredDevices.map((item, index) => (
+              <View key={item.id || index} style={styles.deviceCard}>
+                <MaterialCommunityIcons name="harddisk" size={24} color="#38BDF8" />
+                <View style={styles.deviceInfo}>
+                  <Text style={styles.deviceName}>{item.device_name || item.name || 'Guardian Node'}</Text>
+                  <Text style={styles.deviceSubText}>{item.ip_address || '192.168.1.15'}</Text>
+                </View>
+                <TouchableOpacity style={styles.pairButton} onPress={() => handlePairDevice(item)}>
+                  <Text style={styles.pairButtonText}>Pair</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* Paired Devices Section */}
+        <View style={styles.sectionContainer}>
+          <Text style={styles.sectionTitle}>Paired Devices</Text>
+          <FlatList
+            data={pairedDevices}
+            keyExtractor={(item) => item.id.toString()}
+            renderItem={({ item }) => (
+              <View style={styles.deviceCard}>
+                <MaterialCommunityIcons name="shield-check" size={24} color="#4ADE80" />
+                <View style={styles.deviceInfo}>
+                  <Text style={styles.deviceName}>{item.device_name}</Text>
+                  <Text style={styles.deviceSubText}>MAC: {item.mac_address}</Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.unpairButton}
+                  onPress={() => handleDisconnectDevice(item.id)}
+                >
+                  <MaterialCommunityIcons name="trash-can-outline" size={20} color="#EF4444" />
+                </TouchableOpacity>
+              </View>
+            )}
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>No paired devices found for this account.</Text>
+            }
+          />
+        </View>
+      </View>
+
+      {/* Manual Registration Modal */}
+      <Modal visible={isRegisterModalVisible} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Register New Device</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Device Name (e.g. Living Room Node)"
+              placeholderTextColor="#64748B"
+              value={deviceNameInput}
+              onChangeText={setDeviceNameInput}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="MAC Address (Optional)"
+              placeholderTextColor="#64748B"
+              value={macAddressInput}
+              onChangeText={setMacAddressInput}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="IP Address"
+              placeholderTextColor="#64748B"
+              value={ipAddressInput}
+              onChangeText={setIpAddressInput}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.cancelButton} onPress={() => setIsRegisterModalVisible(false)}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.saveButton}
+                onPress={handleManualRegister}
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.saveButtonText}>Save</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0F172A', padding: 20, paddingTop: 50 },
-  backButton: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
-  backText: { color: '#38BDF8', fontSize: 16, fontWeight: '600', marginLeft: 8 },
-  title: { fontSize: 22, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 20 },
-  deviceCard: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    backgroundColor: '#1E293B', 
-    padding: 16, 
-    borderRadius: 12, 
-    marginBottom: 10, 
-    borderWidth: 1, 
-    borderColor: '#334155' 
+  container: { flex: 1, backgroundColor: '#0F172A' },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
   },
-  connectedCard: {
-    borderColor: '#38BDF8',
-    backgroundColor: '#0F2942'
+  backButton: { padding: 8 },
+  addButton: { padding: 8 },
+  headerTitle: { fontSize: 18, fontWeight: '700', color: '#FFF' },
+  content: { flex: 1, padding: 16 },
+  statusCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E293B',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 16,
   },
-  deviceInfo: { marginLeft: 12, flex: 1 },
-  deviceName: { fontSize: 16, fontWeight: 'bold', color: '#F8FAFC' },
-  deviceMeta: { fontSize: 12, color: '#94A3B8', marginTop: 2 },
-  longPressHint: { fontSize: 10, color: '#38BDF8', marginTop: 4, fontStyle: 'italic' },
-  badgeContainer: { alignItems: 'flex-end' },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  statusText: { color: '#FFF', fontSize: 10, fontWeight: 'bold' },
-  emptyText: { color: '#94A3B8', textAlign: 'center', marginTop: 30, paddingHorizontal: 10 },
-  scanBtn: { flexDirection: 'row', backgroundColor: '#38BDF8', padding: 14, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 15 },
-  disabledBtn: { opacity: 0.5 },
-  scanBtnText: { color: '#0F172A', fontWeight: 'bold', marginLeft: 8 }
+  statusTextContainer: { marginLeft: 12 },
+  statusTitle: { fontSize: 16, fontWeight: '600', color: '#FFF' },
+  statusSubtitle: { fontSize: 12, color: '#94A3B8', marginTop: 2 },
+  actionRow: { marginBottom: 20 },
+  scanButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0284C7',
+    paddingVertical: 12,
+    borderRadius: 8,
+    gap: 8,
+  },
+  disabledButton: { opacity: 0.6 },
+  scanButtonText: { color: '#FFF', fontWeight: '600' },
+  sectionContainer: { marginBottom: 24, flex: 1 },
+  sectionTitle: { fontSize: 14, fontWeight: '600', color: '#94A3B8', marginBottom: 8 },
+  deviceCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E293B',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 8,
+  },
+  deviceInfo: { flex: 1, marginLeft: 12 },
+  deviceName: { fontSize: 15, fontWeight: '600', color: '#FFF' },
+  deviceSubText: { fontSize: 12, color: '#64748B' },
+  pairButton: { backgroundColor: '#38BDF8', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
+  pairButtonText: { color: '#0F172A', fontWeight: '700', fontSize: 12 },
+  unpairButton: { padding: 6 },
+  emptyText: { color: '#64748B', fontStyle: 'italic', marginTop: 8 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 20 },
+  modalContent: { backgroundColor: '#1E293B', borderRadius: 12, padding: 20 },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: '#FFF', marginBottom: 16 },
+  input: {
+    backgroundColor: '#0F172A',
+    color: '#FFF',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 8 },
+  cancelButton: { padding: 10 },
+  cancelButtonText: { color: '#94A3B8', fontWeight: '600' },
+  saveButton: { backgroundColor: '#38BDF8', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 6 },
+  saveButtonText: { color: '#0F172A', fontWeight: '700' },
 });

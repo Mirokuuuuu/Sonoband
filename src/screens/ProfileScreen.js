@@ -10,45 +10,19 @@ import {
   ActivityIndicator,
   Image,
   StatusBar,
-  Platform
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
+import { decode } from 'base64-arraybuffer';
 import { supabase } from '../services/supabaseClient';
 
-// Helper to validate standard 36-char PostgreSQL UUID format
 const isValidUuid = (id) => {
   if (!id) return false;
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   return uuidRegex.test(String(id).trim());
-};
-
-// Pure JS Base64 to ArrayBuffer converter
-const base64ToArrayBuffer = (base64) => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-  let str = base64.replace(/=+$/, '');
-  let bufferLength = str.length * 0.75;
-  let arrayBuffer = new ArrayBuffer(bufferLength);
-  let bytes = new Uint8Array(arrayBuffer);
-
-  let p = 0;
-  for (let i = 0; i < str.length; i += 4) {
-    let encoded1 = chars.indexOf(str[i]);
-    let encoded2 = chars.indexOf(str[i + 1]);
-    let encoded3 = chars.indexOf(str[i + 2]);
-    let encoded4 = chars.indexOf(str[i + 3]);
-
-    let c1 = (encoded1 << 2) | (encoded2 >> 4);
-    let c2 = ((encoded2 & 15) << 4) | (encoded3 >> 2);
-    let c3 = ((encoded3 & 3) << 6) | encoded4;
-
-    bytes[p++] = c1;
-    if (encoded3 !== 64 && encoded3 !== -1) bytes[p++] = c2;
-    if (encoded4 !== 64 && encoded4 !== -1) bytes[p++] = c3;
-  }
-  return arrayBuffer;
 };
 
 export default function ProfileScreen({ route, navigation, onNavigate, userId: propUserId }) {
@@ -56,8 +30,8 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
   const [saving, setSaving] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
 
-  const [authUuid, setAuthUuid] = useState(null); // Auth UUID for foreign key queries
-  const [activeUserId, setActiveUserId] = useState(null); // DB User ID (int or UUID)
+  const [authUuid, setAuthUuid] = useState(null);
+  const [activeUserId, setActiveUserId] = useState(null);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
@@ -72,20 +46,16 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
     try {
       setLoading(true);
 
-      // 1. Fetch active session and current authenticated user
       const { data: sessionData } = await supabase.auth.getSession();
       const { data: authUserData } = await supabase.auth.getUser();
-
       const currentAuthUser = sessionData?.session?.user || authUserData?.user;
 
-      // 2. Resolve target ID with fallbacks to props / route parameters
       const targetUserId =
         propUserId ||
         route?.params?.userId ||
         route?.params?.user?.id ||
         currentAuthUser?.id;
 
-      // Only kick user to Login if absolutely no identifier is found
       if (!targetUserId) {
         Alert.alert('Session Expired', 'Please log in again to access your profile.', [
           {
@@ -103,11 +73,9 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
       }
 
       const realAuthUuid = currentAuthUser?.id || (isValidUuid(targetUserId) ? targetUserId : null);
-      
       setAuthUuid(realAuthUuid);
       setActiveUserId(targetUserId);
 
-      // 3. Fetch from 'users' table
       const { data: userData, error: userError } = await supabase
         .from('users')
         .select('*')
@@ -120,15 +88,13 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         if (userData.name || userData.full_name) setFullName(userData.name || userData.full_name);
         if (userData.email) setEmail(userData.email);
         if (userData.avatar_url) setAvatarUrl(userData.avatar_url);
-        
-        // Read phone number from users table
+
         const userPhone = userData.phone_number || userData.phone || userData.contact_number;
         if (userPhone) setPhone(userPhone);
       } else if (currentAuthUser?.email) {
         setEmail(currentAuthUser.email);
       }
 
-      // 4. Fetch location record if a valid UUID is available
       const lookupUuid = realAuthUuid || (isValidUuid(targetUserId) ? targetUserId : null);
 
       if (lookupUuid) {
@@ -153,7 +119,6 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
           }
         }
       }
-
     } catch (err) {
       console.error('Unexpected profile fetch error:', err);
     } finally {
@@ -165,7 +130,7 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
     try {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert("Permission Required", "Please allow gallery access to update your profile photo.");
+        Alert.alert('Permission Required', 'Please allow gallery access to update your profile photo.');
         return;
       }
 
@@ -180,7 +145,7 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         uploadAvatar(result.assets[0].uri);
       }
     } catch (err) {
-      console.error("Image picking error:", err);
+      console.error('Image picking error:', err);
     }
   };
 
@@ -188,7 +153,7 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
     setUploadingImage(true);
     try {
       const base64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: 'base64',
+        encoding: FileSystem.EncodingType.Base64,
       });
 
       const fileExt = uri.split('.').pop()?.toLowerCase() || 'jpg';
@@ -198,9 +163,9 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
 
       const { error: uploadError } = await supabase.storage
         .from('avatars')
-        .upload(fileName, base64ToArrayBuffer(base64), { 
-          contentType, 
-          upsert: true 
+        .upload(fileName, decode(base64), {
+          contentType,
+          upsert: true,
         });
 
       if (uploadError) throw uploadError;
@@ -212,19 +177,17 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
       const freshPublicUrl = `${publicUrlData.publicUrl}?t=${Date.now()}`;
       setAvatarUrl(freshPublicUrl);
 
-      // Update public.users table
       if (activeUserId) {
         await supabase
           .from('users')
-          .update({ 
-            name: fullName.trim(), 
+          .update({
+            name: fullName.trim(),
             avatar_url: freshPublicUrl,
-            phone_number: phone.trim()
+            phone_number: phone.trim(),
           })
           .eq('id', activeUserId);
       }
 
-      // Upsert user_locations if authUuid exists
       const targetUuid = authUuid || (isValidUuid(activeUserId) ? activeUserId : null);
 
       if (targetUuid) {
@@ -237,23 +200,24 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         const finalLat = existingLoc?.latitude ?? coords.latitude ?? 0.0;
         const finalLng = existingLoc?.longitude ?? coords.longitude ?? 0.0;
 
-        await supabase
-          .from('user_locations')
-          .upsert({ 
-            user_id: targetUuid, 
+        await supabase.from('user_locations').upsert(
+          {
+            user_id: targetUuid,
             full_name: fullName.trim(),
             phone_number: phone.trim(),
             avatar_url: freshPublicUrl,
             latitude: finalLat,
             longitude: finalLng,
-            updated_at: new Date().toISOString()
-          }, { onConflict: 'user_id' });
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'user_id' }
+        );
       }
 
-      Alert.alert("Success", "Profile photo updated successfully!");
+      Alert.alert('Success', 'Profile photo updated successfully!');
     } catch (err) {
-      console.error("Avatar upload error:", err.message || err);
-      Alert.alert("Error", err.message || "Failed to upload photo.");
+      console.error('Avatar upload error:', err.message || err);
+      Alert.alert('Error', err.message || 'Failed to upload photo.');
     } finally {
       setUploadingImage(false);
     }
@@ -276,21 +240,19 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
     try {
       setSaving(true);
 
-      // 1. Update public.users table
       if (activeUserId) {
         const { error: userError } = await supabase
           .from('users')
-          .update({ 
+          .update({
             name: fullName.trim(),
             avatar_url: avatarUrl,
-            phone_number: phone.trim()
+            phone_number: phone.trim(),
           })
           .eq('id', activeUserId);
 
         if (userError) console.warn('users update warning:', userError.message);
       }
 
-      // 2. Upsert user_locations if a valid UUID is present
       const targetUuid = authUuid || (isValidUuid(activeUserId) ? activeUserId : null);
 
       if (targetUuid) {
@@ -303,9 +265,8 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         const finalLat = existingLoc?.latitude ?? coords.latitude ?? 0.0;
         const finalLng = existingLoc?.longitude ?? coords.longitude ?? 0.0;
 
-        const { error: locError } = await supabase
-          .from('user_locations')
-          .upsert({
+        const { error: locError } = await supabase.from('user_locations').upsert(
+          {
             user_id: targetUuid,
             full_name: fullName.trim(),
             phone_number: phone.trim(),
@@ -313,7 +274,9 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
             latitude: finalLat,
             longitude: finalLng,
             updated_at: new Date().toISOString(),
-          }, { onConflict: 'user_id' });
+          },
+          { onConflict: 'user_id' }
+        );
 
         if (locError) throw locError;
       }
@@ -347,8 +310,7 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#1E293B" />
-      
-      {/* Header */}
+
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconButton} onPress={handleBackNavigation}>
           <Ionicons name="arrow-back" size={24} color="#F8FAFC" />
@@ -364,7 +326,6 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Profile Avatar Card */}
         <View style={styles.avatarCard}>
           <TouchableOpacity onPress={handlePickImage} disabled={uploadingImage} activeOpacity={0.8}>
             <View style={styles.avatarWrapper}>
@@ -395,10 +356,9 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
           </TouchableOpacity>
 
           <Text style={styles.profileName}>{fullName || 'Sonoband User'}</Text>
-          <Text style={styles.profileEmail}>{email || 'No email associated'}</Text>
+          <Text style={styles.profileEmail}>{email || 'No gmail associated'}</Text>
         </View>
 
-        {/* Input Form */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Personal Details</Text>
 
@@ -411,7 +371,7 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
             placeholderTextColor="#64748B"
           />
 
-          <Text style={styles.inputLabel}>Email Address (Read Only)</Text>
+          <Text style={styles.inputLabel}>Gmail Address (Read Only)</Text>
           <TextInput
             style={[styles.input, styles.readOnlyInput]}
             value={email}
@@ -434,14 +394,14 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: '#0F172A', 
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 0 
+  container: {
+    flex: 1,
+    backgroundColor: '#0F172A',
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0,
   },
-  center: { 
-    justifyContent: 'center', 
-    alignItems: 'center' 
+  center: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   header: {
     flexDirection: 'row',
@@ -453,45 +413,45 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
   },
-  iconButton: { 
-    padding: 8, 
-    borderRadius: 10, 
-    backgroundColor: '#334155' 
+  iconButton: {
+    padding: 8,
+    borderRadius: 10,
+    backgroundColor: '#334155',
   },
-  headerTitle: { 
-    fontSize: 18, 
-    fontWeight: '700', 
-    color: '#F8FAFC' 
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#F8FAFC',
   },
-  saveBtn: { 
-    backgroundColor: '#38BDF8', 
-    paddingHorizontal: 16, 
-    paddingVertical: 8, 
-    borderRadius: 8 
+  saveBtn: {
+    backgroundColor: '#38BDF8',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
-  saveBtnText: { 
-    color: '#0F172A', 
-    fontWeight: '700', 
-    fontSize: 14 
+  saveBtnText: {
+    color: '#0F172A',
+    fontWeight: '700',
+    fontSize: 14,
   },
-  scrollContent: { 
-    padding: 16, 
-    paddingBottom: 40 
+  scrollContent: {
+    padding: 16,
+    paddingBottom: 40,
   },
-  avatarCard: { 
-    alignItems: 'center', 
-    marginBottom: 20, 
-    marginTop: 10 
+  avatarCard: {
+    alignItems: 'center',
+    marginBottom: 20,
+    marginTop: 10,
   },
-  avatarWrapper: { 
-    position: 'relative', 
-    width: 84, 
-    height: 84 
+  avatarWrapper: {
+    position: 'relative',
+    width: 84,
+    height: 84,
   },
-  avatarImage: { 
-    width: 84, 
-    height: 84, 
-    borderRadius: 42 
+  avatarImage: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
   },
   avatarCircle: {
     width: 84,
@@ -501,18 +461,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  avatarText: { 
-    fontSize: 32, 
-    fontWeight: '700', 
-    color: '#0F172A', 
-    textAlign: 'center' 
+  avatarText: {
+    fontSize: 32,
+    fontWeight: '700',
+    color: '#0F172A',
+    textAlign: 'center',
   },
-  uploadOverlay: { 
-    ...StyleSheet.absoluteFillObject, 
-    backgroundColor: 'rgba(0,0,0,0.6)', 
-    borderRadius: 42, 
-    justifyContent: 'center', 
-    alignItems: 'center' 
+  uploadOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 42,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   cameraBadge: {
     position: 'absolute',
@@ -524,21 +484,21 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#0F172A',
   },
-  changePhotoText: { 
-    color: '#38BDF8', 
-    fontSize: 13, 
-    fontWeight: '600', 
-    marginBottom: 8 
+  changePhotoText: {
+    color: '#38BDF8',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 8,
   },
-  profileName: { 
-    fontSize: 20, 
-    fontWeight: '700', 
-    color: '#F8FAFC' 
+  profileName: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#F8FAFC',
   },
-  profileEmail: { 
-    fontSize: 13, 
-    color: '#94A3B8', 
-    marginTop: 2 
+  profileEmail: {
+    fontSize: 13,
+    color: '#94A3B8',
+    marginTop: 2,
   },
   card: {
     backgroundColor: '#1E293B',
@@ -548,17 +508,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155',
   },
-  cardTitle: { 
-    fontSize: 16, 
-    fontWeight: '700', 
-    color: '#F8FAFC', 
-    marginBottom: 16 
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#F8FAFC',
+    marginBottom: 16,
   },
-  inputLabel: { 
-    fontSize: 13, 
-    fontWeight: '600', 
-    color: '#94A3B8', 
-    marginBottom: 6 
+  inputLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#94A3B8',
+    marginBottom: 6,
   },
   input: {
     backgroundColor: '#0F172A',
@@ -570,8 +530,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 16,
   },
-  readOnlyInput: { 
-    opacity: 0.6, 
-    backgroundColor: '#1E293B' 
+  readOnlyInput: {
+    opacity: 0.6,
+    backgroundColor: '#1E293B',
   },
 });

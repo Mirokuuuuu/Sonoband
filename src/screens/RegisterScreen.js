@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, Alert, ActivityIndicator } from 'react-native';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import { supabase } from '../services/supabaseClient';
 import bcrypt from 'react-native-bcrypt';
@@ -25,43 +25,66 @@ export default function RegisterScreen({ navigation, onNavigate }) {
   };
 
   const handleRegistration = async () => {
-    if (!email.trim() || !password.trim() || !fullName.trim()) {
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedName = fullName.trim();
+    const trimmedPassword = password.trim();
+
+    if (!trimmedEmail || !trimmedPassword || !trimmedName) {
       Alert.alert('Registration Error', 'Please fill in all required fields.');
       return;
     }
 
+    // Restriction: Require valid @gmail.com domain
+    if (!trimmedEmail.endsWith('@gmail.com') || trimmedEmail === '@gmail.com') {
+      Alert.alert('Invalid Email Domain', 'Please register using a valid @gmail.com account.');
+      return;
+    }
+
     if (!hasMinLength || !hasUppercase || !hasLowercase || !hasSpecialChar) {
-      Alert.alert('Weak Password', 'Your password does not meet the security requirements.');
+      Alert.alert('Weak Password', 'Your password does not meet security requirements.');
       return;
     }
 
     setLoading(true);
     try {
+      // 1. Hash password for custom DB record
       const salt = bcrypt.genSaltSync(10);
-      const hashedPassword = bcrypt.hashSync(password.trim(), salt);
+      const hashedPassword = bcrypt.hashSync(trimmedPassword, salt);
 
-      const { data, error } = await supabase
+      // 2. Insert user directly into custom 'users' table
+      const { data: dbData, error: dbError } = await supabase
         .from('users')
         .insert([
           {
-            name: fullName.trim(),
-            email: email.trim().toLowerCase(),
+            name: trimmedName,
+            email: trimmedEmail,
             password: hashedPassword,
-            role: 'user'
-          }
+            role: 'user',
+          },
         ])
         .select();
 
-      if (error) {
-        Alert.alert('Registration Failure', error.message);
+      if (dbError) {
+        Alert.alert('Registration Failure', dbError.message);
+        setLoading(false);
         return;
       }
 
+      // 3. Optional background Auth registration
+      await supabase.auth.signUp({
+        email: trimmedEmail,
+        password: trimmedPassword,
+        options: {
+          data: { full_name: trimmedName },
+        },
+      }).catch((err) => console.log('Auth signup rate limit ignored:', err.message));
+
       Alert.alert('Success', 'Account created successfully!', [
-        { text: 'Proceed to Login', onPress: () => navigateTo('login') }
+        { text: 'Proceed to Login', onPress: () => navigateTo('login') },
       ]);
     } catch (error) {
       Alert.alert('Network Error', 'Failed to communicate with remote database.');
+      console.error('Registration Catch Error:', error);
     } finally {
       setLoading(false);
     }
@@ -87,7 +110,7 @@ export default function RegisterScreen({ navigation, onNavigate }) {
           />
         </View>
 
-        <Text style={styles.label}>Email Address</Text>
+        <Text style={styles.label}>Gmail Address</Text>
         <View style={styles.inputWrapper}>
           <MaterialCommunityIcons name="email-outline" size={20} color="#94a3b8" style={styles.inputIcon} />
           <TextInput 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, StatusBar, Platform } from 'react-native';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 
 const SOUND_MANUAL_LIST = [
@@ -22,19 +22,21 @@ const SOUND_MANUAL_LIST = [
 export default function SoundManualScreen({ navigation }) {
   const getBadgeStyle = (priority) => {
     switch (priority) {
-      case 'CRITICAL': return { bg: '#FF3B3015', text: '#FF3B30' };
-      case 'HIGH': return { bg: '#FF950015', text: '#FF9500' };
-      case 'MEDIUM': return { bg: '#007AFF15', text: '#007AFF' };
-      default: return { bg: '#8E8E9315', text: '#8E8E93' };
+      case 'CRITICAL': return { bg: 'rgba(239, 68, 68, 0.2)', text: '#EF4444' };
+      case 'HIGH': return { bg: 'rgba(249, 115, 22, 0.2)', text: '#F97316' };
+      case 'MEDIUM': return { bg: 'rgba(56, 189, 248, 0.2)', text: '#38BDF8' };
+      default: return { bg: 'rgba(148, 163, 184, 0.2)', text: '#94A3B8' };
     }
   };
 
   return (
     <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <MaterialCommunityIcons name="arrow-left" size={26} color="#1C1C1E" />
+        <TouchableOpacity onPress={() => navigation && navigation.goBack()} style={styles.backBtn}>
+          <MaterialCommunityIcons name="arrow-left" size={24} color="#38BDF8" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Detected Sounds Guide</Text>
       </View>
@@ -70,23 +72,30 @@ export default function SoundManualScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F2F2F7', paddingTop: 50, paddingHorizontal: 16 },
+  container: { 
+    flex: 1, 
+    backgroundColor: '#0F172A', 
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 10 : 50, 
+    paddingHorizontal: 16 
+  },
   header: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  backBtn: { padding: 4, marginRight: 12 },
-  headerTitle: { fontSize: 22, fontWeight: '700', color: '#1C1C1E' },
-  subTitle: { fontSize: 14, color: '#8E8E93', marginBottom: 16 },
+  backBtn: { padding: 4, marginRight: 8 },
+  headerTitle: { fontSize: 22, fontWeight: '700', color: '#F8FAFC' },
+  subTitle: { fontSize: 13, color: '#94A3B8', marginBottom: 16 },
   card: {
     flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#1E293B',
     borderRadius: 12,
     padding: 14,
     marginBottom: 10,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#334155',
   },
   iconBox: { width: 44, height: 44, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
   titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  soundName: { fontSize: 16, fontWeight: '600', color: '#1C1C1E' },
+  soundName: { fontSize: 16, fontWeight: '600', color: '#F8FAFC' },
   badge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
   badgeText: { fontSize: 10, fontWeight: '700' },
-  desc: { fontSize: 13, color: '#6C6C70', lineHeight: 17 },
+  desc: { fontSize: 13, color: '#94A3B8', lineHeight: 18 },
 });

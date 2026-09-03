@@ -40,67 +40,91 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
   };
 
   const handleLogin = async () => {
-    if (!email.trim() || !password.trim()) {
-      Alert.alert('Required Fields', 'Please fill in both email and password.');
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPassword = password.trim();
+
+    if (!trimmedEmail || !trimmedPassword) {
+      Alert.alert('Required Fields', 'Please fill in both gmail and password.');
       return;
     }
 
     setLoading(true);
 
     try {
-      const { data, error } = await supabase
+      // 1. Establish an active Supabase Auth session
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: trimmedEmail,
+        password: trimmedPassword,
+      });
+
+      // 2. Query custom user table record
+      const { data: userData, error: dbError } = await supabase
         .from('users')
         .select('*')
-        .eq('email', email.trim().toLowerCase())
+        .eq('email', trimmedEmail)
         .maybeSingle();
 
-      if (error || !data) {
-        Alert.alert('Access Denied', 'No record found matching that email address.');
+      let resolvedUserId = null;
+      let isPasswordMatch = false;
+
+      if (userData) {
+        resolvedUserId = userData.id !== undefined ? userData.id : userData.user_id;
+        // Verify via local bcrypt fallback if auth record was registered via DB script directly
+        isPasswordMatch = bcrypt.compareSync(trimmedPassword, userData.password);
+      }
+
+      // Deny access if both Supabase Auth and manual database record fail
+      if (authError && !isPasswordMatch) {
+        Alert.alert('Access Denied', authError?.message || 'Invalid gmail or password.');
         setLoading(false);
         return;
       }
 
-      const isPasswordMatch = bcrypt.compareSync(password.trim(), data.password);
-
-      if (isPasswordMatch) {
-        // Support both 'id' and 'user_id' column names
-        const resolvedUserId = data.id !== undefined ? data.id : data.user_id;
-
-        if (resolvedUserId === undefined || resolvedUserId === null) {
-          Alert.alert('Login Error', 'User record found, but no valid ID key exists.');
-          setLoading(false);
-          return;
-        }
-
-        // Always store as String in AsyncStorage
-        await AsyncStorage.setItem('user_id', String(resolvedUserId));
-        console.log('User logged in with ID:', resolvedUserId);
-
-        try {
-          await supabase
-            .from('device_connections')
-            .insert([
-              {
-                user_id: resolvedUserId,
-                status: 'online',
-                timestamp: new Date().toISOString(),
-              },
-            ]);
-        } catch (connErr) {
-          console.log('Device connection log skipped:', connErr.message);
-        }
-
-        setLoading(false);
-
-        if (onLoginSuccess) {
-          onLoginSuccess(resolvedUserId);
-        }
-
-        navigateTo('Dashboard', { userId: resolvedUserId });
-      } else {
-        Alert.alert('Access Denied', 'The password you entered is incorrect.');
-        setLoading(false);
+      if (resolvedUserId === undefined || resolvedUserId === null) {
+        // Fallback: Use numeric hash/string if custom user ID is missing
+        resolvedUserId = authData?.user?.id || '1';
       }
+
+      // 3. Save active User ID to local storage
+      await AsyncStorage.setItem('user_id', String(resolvedUserId));
+
+      // 4. Record active login audit event
+      try {
+        await supabase
+          .from('audit_logs')
+          .insert([
+            {
+              user_id: Number(resolvedUserId) || null,
+              action: 'login',
+              details: 'User signed in successfully',
+            },
+          ]);
+      } catch (auditErr) {
+        console.log('Audit log skipped:', auditErr.message);
+      }
+
+      // 5. Track connection status
+      try {
+        await supabase
+          .from('device_connections')
+          .insert([
+            {
+              user_id: resolvedUserId,
+              status: 'online',
+              timestamp: new Date().toISOString(),
+            },
+          ]);
+      } catch (connErr) {
+        console.log('Device connection log skipped:', connErr.message);
+      }
+
+      setLoading(false);
+
+      if (onLoginSuccess) {
+        onLoginSuccess(resolvedUserId);
+      }
+
+      navigateTo('Dashboard', { userId: resolvedUserId });
     } catch (error) {
       console.error('Login system error:', error);
       Alert.alert('System Error', 'Failed to authenticate user.');
@@ -120,12 +144,12 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.inputLabel}>Email Address</Text>
+          <Text style={styles.inputLabel}>Gmail Address</Text>
           <View style={styles.inputWrapper}>
             <MaterialCommunityIcons name="email-outline" size={20} color="#94a3b8" style={styles.inputIcon} />
             <TextInput
               style={styles.input}
-              placeholder="name@example.com"
+              placeholder="name@gmail.com"
               placeholderTextColor="#64748b"
               value={email}
               onChangeText={setEmail}

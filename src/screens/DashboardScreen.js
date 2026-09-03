@@ -65,9 +65,9 @@ export default function DashboardScreen({
   const [userName, setUserName] = useState('User');
   const [batteryLevel, setBatteryLevel] = useState(null);
   const [showTutorial, setShowTutorial] = useState(false);
-  const [activeDeviceCount, setActiveDeviceCount] = useState(0);
+  const [isConnected, setIsConnected] = useState(false);
   
-  // Power defaults strictly to OFF (false) until toggled by user
+  // Power state strictly tracks hardware connectivity
   const [devicePower, setDevicePower] = useState(false);
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
   const [deviceIp, setDeviceIp] = useState(null);
@@ -89,7 +89,6 @@ export default function DashboardScreen({
         const missingFields = [];
         if (!resolvedName || !String(resolvedName).trim()) missingFields.push('• Full Name');
         if (!data.phone_number || !String(data.phone_number).trim()) missingFields.push('• Phone Number');
-        if (!data.emergency_contact || !String(data.emergency_contact).trim()) missingFields.push('• Emergency Contact');
         if (!data.avatar_url || !String(data.avatar_url).trim()) missingFields.push('• Profile Photo');
 
         if (missingFields.length > 0 && !hasDismissedProfileAlert) {
@@ -104,7 +103,7 @@ export default function DashboardScreen({
         }
       }
 
-      // Fetch paired device without triggering auto-connection or automatic HTTP requests
+      // Fetch paired device and verify active heartbeat state
       const { data: deviceData } = await supabase
         .from('user_devices')
         .select('id, mac_address, last_seen, is_on, ip_address')
@@ -112,17 +111,28 @@ export default function DashboardScreen({
       
       if (deviceData && deviceData.length > 0) {
         const dev = deviceData[0];
-        setActiveDeviceCount(deviceData.length);
+        
+        // Active check: is power on and last seen within 15 seconds?
+        const lastSeenMs = dev.last_seen ? new Date(dev.last_seen).getTime() : 0;
+        const isRecentlyActive = (Date.now() - lastSeenMs) < 15000;
+        const activeState = Boolean(dev.is_on && isRecentlyActive);
+
+        setIsConnected(activeState);
+        setDevicePower(activeState);
         setCurrentDeviceId(dev.id);
         setDeviceIp(dev.ip_address);
 
-        // Explicitly set default power state to OFF (false)
-        setDevicePower(false);
-        if (typeof setIsDeviceOn === 'function') setIsDeviceOn(false);
+        if (typeof setIsDeviceOn === 'function') {
+          setIsDeviceOn(activeState);
+        }
       } else {
-        setActiveDeviceCount(0);
+        setIsConnected(false);
+        setDevicePower(false);
         setCurrentDeviceId(null);
         setDeviceIp(null);
+        if (typeof setIsDeviceOn === 'function') {
+          setIsDeviceOn(false);
+        }
       }
 
     } catch (err) {
@@ -159,12 +169,11 @@ export default function DashboardScreen({
 
     const newPowerState = !devicePower;
 
-    // 1. Immediately update UI state
     setDevicePower(newPowerState);
+    setIsConnected(newPowerState);
     if (typeof setIsDeviceOn === 'function') setIsDeviceOn(newPowerState);
 
     try {
-      // 2. Resolve hardware IP address if missing from state
       let targetIp = deviceIp;
       if (!targetIp) {
         const { data: devFetch } = await supabase
@@ -176,7 +185,6 @@ export default function DashboardScreen({
         if (targetIp) setDeviceIp(targetIp);
       }
 
-      // 3. Send HTTP request directly to hardware endpoint
       if (targetIp) {
         try {
           const controller = new AbortController();
@@ -188,11 +196,10 @@ export default function DashboardScreen({
           });
           clearTimeout(timeoutId);
         } catch (networkErr) {
-          console.warn('Direct network request to device failed or timed out:', networkErr);
+          console.warn('Direct network request to device timed out:', networkErr);
         }
       }
 
-      // 4. Update ONLY the 'is_on' and 'last_seen' columns in Supabase matching your schema
       let query = supabase
         .from('user_devices')
         .update({ 
@@ -210,14 +217,15 @@ export default function DashboardScreen({
 
       if (error) {
         console.error('Database Sync Error:', error);
-        // Rollback state on error
         setDevicePower(!newPowerState);
+        setIsConnected(!newPowerState);
         if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
         Alert.alert('Sync Error', 'Could not update power state in database.');
       }
     } catch (err) {
       console.error('Power toggle exception:', err);
       setDevicePower(!newPowerState);
+      setIsConnected(!newPowerState);
       if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
     }
   };
@@ -269,9 +277,18 @@ export default function DashboardScreen({
             style={[styles.bentoCard, styles.largeCard]}
             onPress={() => navigation && navigation.navigate('DevicePairing', { userId })}
           >
-            <Text style={styles.cardBadge}>{activeDeviceCount} Registered</Text>
+            <Text 
+              style={[
+                styles.cardBadge, 
+                { backgroundColor: isConnected ? '#22C55E' : '#64748B' }
+              ]}
+            >
+              {isConnected ? 'CONNECTED' : 'NOT CONNECTED'}
+            </Text>
             <Text style={styles.cardTitle}>Find & Pair Device</Text>
-            <Text style={styles.cardSubtext}>Manage paired devices & list</Text>
+            <Text style={styles.cardSubtext}>
+              {isConnected ? 'Device online & listening' : 'No active connection'}
+            </Text>
           </TouchableOpacity>
         </View>
 
@@ -297,24 +314,28 @@ export default function DashboardScreen({
           <View style={[styles.statusDot, { backgroundColor: devicePower ? '#22C55E' : '#EF4444' }]} />
         </TouchableOpacity>
 
-        {/* GUIDES & TUTORIALS */}
+        {/* GUIDES & MANUALS - SIDE-BY-SIDE BOX SHAPES */}
         <Text style={[styles.mainTitle, { marginTop: 25 }]}>App Guides & Manuals</Text>
 
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={() => setShowTutorial(true)}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>📖 How Sonoband Works</Text>
-            <Text style={styles.cardActionText}>VIEW TUTORIAL ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>Overview of sound detection, directional alerts & emergency GPS</Text>
-        </TouchableOpacity>
+        <View style={styles.bentoRow}>
+          <TouchableOpacity 
+            style={[styles.bentoCard, styles.squareBoxCard]} 
+            onPress={() => setShowTutorial(true)}
+          >
+            <Ionicons name="book-outline" size={28} color="#38BDF8" style={{ marginBottom: 8 }} />
+            <Text style={styles.cardTitle}>How Sonoband Works</Text>
+            <Text style={styles.cardSubtext}>Overview of sound detection & alerts</Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={() => navigation && navigation.navigate('SoundManual')}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>🔊 Core Sound Reference Manual</Text>
-            <Text style={styles.cardActionText}>OPEN MANUAL ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>List of automatically identified sounds, decibel limits & alert types</Text>
-        </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.bentoCard, styles.squareBoxCard]} 
+            onPress={() => navigation && navigation.navigate('SoundManual')}
+          >
+            <Ionicons name="volume-high-outline" size={28} color="#38BDF8" style={{ marginBottom: 8 }} />
+            <Text style={styles.cardTitle}>Core Sound Reference</Text>
+            <Text style={styles.cardSubtext}>Identified sounds & alert types</Text>
+          </TouchableOpacity>
+        </View>
 
         {/* QUICK NAVIGATION */}
         <Text style={[styles.mainTitle, { marginTop: 15 }]}>Quick Navigation</Text>
@@ -381,13 +402,14 @@ const styles = StyleSheet.create({
   bentoCard: { backgroundColor: '#1E293B', borderRadius: 18, padding: 16, borderWidth: 1, borderColor: '#334155' },
   smallCard: { width: '38%', height: 135, justifyContent: 'space-between' },
   largeCard: { width: '58%', height: 135, justifyContent: 'space-between' },
+  squareBoxCard: { width: '48%', height: 140, justifyContent: 'center' },
   fullWidthCard: { width: '100%', marginBottom: 12 },
-  cardBadge: { backgroundColor: '#38BDF8', color: '#0F172A', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, alignSelf: 'flex-start', fontSize: 10, fontWeight: 'bold' },
-  cardTitle: { fontSize: 16, fontWeight: 'bold', color: '#F8FAFC' },
+  cardBadge: { color: '#0F172A', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, alignSelf: 'flex-start', fontSize: 10, fontWeight: 'bold' },
+  cardTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC' },
   cardValue: { fontSize: 32, fontWeight: 'bold', color: '#38BDF8' },
   cardLabel: { fontSize: 12, color: '#94A3B8' },
   batteryStatusText: { fontSize: 10, fontWeight: 'bold', color: '#22C55E' },
-  cardSubtext: { fontSize: 12, color: '#94A3B8', marginTop: 4 },
+  cardSubtext: { fontSize: 11, color: '#94A3B8', marginTop: 4 },
   cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardActionText: { fontSize: 11, fontWeight: 'bold', color: '#38BDF8' },
   toggleBar: { borderRadius: 18, padding: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 5, borderWidth: 1 },

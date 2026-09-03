@@ -1,212 +1,366 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  Switch, 
-  StyleSheet, 
-  Alert, 
-  TouchableOpacity, 
+import {
+  StyleSheet,
+  Text,
+  View,
+  SafeAreaView,
+  StatusBar,
+  TouchableOpacity,
+  ScrollView,
+  Switch,
   ActivityIndicator,
-  ScrollView 
+  Alert,
+  Platform,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { supabase, logSystemActivity } from '../services/supabaseClient';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import Slider from '@react-native-community/slider';
+import { supabase } from '../services/supabaseClient';
 
-export default function DeviceControlScreen({ navigation, userId, selectedMacAddress, isDeviceOn, setIsDeviceOn }) {
-  const [isEnabled, setIsEnabled] = useState(isDeviceOn ?? false);
-  const [sensitivity, setSensitivity] = useState('narrow');
-  const [vibrationIntensity, setVibrationIntensity] = useState('medium');
+export default function DeviceControlScreen({ navigation, userId }) {
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deviceId, setDeviceId] = useState(null);
+  const [deviceIp, setDeviceIp] = useState(null);
+
+  // Settings State
+  const [vibrationIntensity, setVibrationIntensity] = useState(3); // Scale 1 - 5
+  const [soundThreshold, setSoundThreshold] = useState(65); // Decibels (dB)
+  const [hapticFeedback, setHapticFeedback] = useState(true);
+  const [ledIndicators, setLedIndicators] = useState(true);
 
   useEffect(() => {
-    if (userId) {
-      fetchSettings();
-    }
-  }, [userId, selectedMacAddress]);
+    fetchDeviceSettings();
+  }, [userId]);
 
-  const fetchSettings = async () => {
-    if (!userId) return;
+  const fetchDeviceSettings = async () => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+
     try {
-      let query = supabase.from('user_devices').select('*').eq('user_id', userId);
-      if (selectedMacAddress) {
-        query = query.eq('mac_address', selectedMacAddress);
+      setLoading(true);
+
+      const { data, error } = await supabase
+        .from('user_devices')
+        .select('id, ip_address, vibration_intensity, sound_threshold, haptic_enabled, led_enabled')
+        .eq('user_id', String(userId).trim())
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        console.warn('Device fetch warning:', error.message);
       }
 
-      const { data, error } = await query.maybeSingle();
-
-      if (data && !error) {
-        setIsEnabled(data.is_on ?? false);
-        setSensitivity(data.sensitivity || 'narrow');
-        setVibrationIntensity(data.vibration_intensity || 'medium');
-        if (setIsDeviceOn) setIsDeviceOn(data.is_on ?? false);
+      if (data) {
+        setDeviceId(data.id);
+        setDeviceIp(data.ip_address);
+        if (data.vibration_intensity !== null) setVibrationIntensity(data.vibration_intensity);
+        if (data.sound_threshold !== null) setSoundThreshold(data.sound_threshold);
+        if (data.haptic_enabled !== null) setHapticFeedback(data.haptic_enabled);
+        if (data.led_enabled !== null) setLedIndicators(data.led_enabled);
       }
     } catch (err) {
-      console.log('Fetching settings info:', err.message);
+      console.error('Error loading device settings:', err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const saveSettings = async (newOn, newSens, newVib) => {
-    if (!userId) {
-      Alert.alert("Error", "User session not loaded.");
-      return;
-    }
-    setSaving(true);
+  const handleSaveSettings = async () => {
+    if (!userId) return;
+
     try {
-      const payload = {
-        user_id: userId,
-        is_on: newOn,
-        sensitivity: newSens,
-        vibration_intensity: newVib,
-        updated_at: new Date().toISOString()
+      setSaving(true);
+
+      // Attempt to post setting updates directly to local device IP if connected
+      if (deviceIp) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+          await fetch(
+            `http://${deviceIp}/settings?vibe=${vibrationIntensity}&thresh=${soundThreshold}&led=${ledIndicators ? 1 : 0}`,
+            { method: 'GET', signal: controller.signal }
+          );
+          clearTimeout(timeoutId);
+        } catch (networkErr) {
+          console.warn('Direct HTTP update to device timed out:', networkErr);
+        }
+      }
+
+      // Sync settings to database
+      const updates = {
+        user_id: String(userId).trim(),
+        vibration_intensity: vibrationIntensity,
+        sound_threshold: soundThreshold,
+        haptic_enabled: hapticFeedback,
+        led_enabled: ledIndicators,
+        last_seen: new Date().toISOString(),
       };
 
-      if (selectedMacAddress) {
-        payload.mac_address = selectedMacAddress.trim();
-      }
-
-      let error;
-      if (selectedMacAddress) {
-        const res = await supabase
-          .from('user_devices')
-          .upsert(payload, { onConflict: 'mac_address' });
-        error = res.error;
+      let query = supabase.from('user_devices');
+      if (deviceId) {
+        query = query.update(updates).eq('id', deviceId);
       } else {
-        const res = await supabase
-          .from('user_devices')
-          .update(payload)
-          .eq('user_id', userId);
-        error = res.error;
+        query = query.upsert(updates, { onConflict: 'user_id' });
       }
 
+      const { error } = await query;
       if (error) throw error;
 
-      await logSystemActivity(
-        userId, 
-        'SETTINGS_CHANGE', 
-        `Power: ${newOn ? 'ON' : 'OFF'} | Sensitivity: ${newSens} | Vib: ${newVib}`
-      );
-
+      Alert.alert('Settings Saved', 'Device thresholds and preferences updated.');
     } catch (err) {
-      console.error('Save Settings Error:', err);
-      Alert.alert("Sync Error", err.message || "Failed to update settings.");
+      Alert.alert('Save Failed', err.message || 'Could not update device controls.');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleTogglePower = (val) => {
-    setIsEnabled(val);
-    if (setIsDeviceOn) setIsDeviceOn(val);
-    saveSettings(val, sensitivity, vibrationIntensity);
-  };
-
-  const handleSensitivityChange = (mode) => {
-    setSensitivity(mode);
-    saveSettings(isEnabled, mode, vibrationIntensity);
-  };
-
-  const handleVibrationChange = (level) => {
-    setVibrationIntensity(level);
-    saveSettings(isEnabled, sensitivity, level);
-  };
-
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
-      <TouchableOpacity 
-        style={styles.backButton} 
-        onPress={() => navigation && navigation.goBack()}
-      >
-        <Ionicons name="arrow-back" size={22} color="#38BDF8" />
-        <Text style={styles.backText}>Dashboard</Text>
-      </TouchableOpacity>
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
-      <Text style={styles.title}>SonoBand Device Controls</Text>
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity style={styles.backButton} onPress={() => navigation && navigation.goBack()}>
+          <Ionicons name="arrow-back" size={24} color="#F8FAFC" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Device Controls</Text>
+        <TouchableOpacity style={styles.saveHeaderBtn} onPress={handleSaveSettings} disabled={saving}>
+          {saving ? <ActivityIndicator size="small" color="#38BDF8" /> : <Text style={styles.saveHeaderText}>Save</Text>}
+        </TouchableOpacity>
+      </View>
 
-      {/* POWER TOGGLE */}
-      <View style={styles.card}>
-        <View style={styles.row}>
-          <View>
-            <Text style={styles.cardTitle}>Device Power</Text>
-            <Text style={styles.cardSubtext}>Turn detection engine ON or OFF</Text>
-          </View>
-          <Switch value={isEnabled} onValueChange={handleTogglePower} />
+      {loading ? (
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color="#38BDF8" />
         </View>
-      </View>
+      ) : (
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          {/* Vibration Intensity */}
+          <View style={styles.card}>
+            <View style={styles.cardTitleRow}>
+              <MaterialCommunityIcons name="vibrate" size={22} color="#38BDF8" />
+              <Text style={styles.cardTitle}>Vibration Intensity Level</Text>
+            </View>
+            <Text style={styles.cardSubtext}>
+              Adjust how strongly the wristband vibrates upon detecting a alert.
+            </Text>
 
-      {/* SENSITIVITY RANGE */}
-      <Text style={styles.sectionHeader}>Sound Detection Range</Text>
-      <View style={styles.card}>
-        <TouchableOpacity 
-          style={[styles.optionCard, sensitivity === 'narrow' && styles.selectedOptionCard]}
-          onPress={() => handleSensitivityChange('narrow')}
-        >
-          <Ionicons name="contract-outline" size={24} color={sensitivity === 'narrow' ? '#38BDF8' : '#64748B'} />
-          <View style={styles.optionTextContainer}>
-            <Text style={styles.optionTitle}>Narrow Mode (Low Sensitivity)</Text>
-            <Text style={styles.optionDesc}>Filters out distant noise. Triggers only on prominent nearby sounds.</Text>
-          </View>
-        </TouchableOpacity>
-
-        <TouchableOpacity 
-          style={[styles.optionCard, sensitivity === 'wide' && styles.selectedOptionCard, { marginTop: 10 }]}
-          onPress={() => handleSensitivityChange('wide')}
-        >
-          <Ionicons name="expand-outline" size={24} color={sensitivity === 'wide' ? '#38BDF8' : '#64748B'} />
-          <View style={styles.optionTextContainer}>
-            <Text style={styles.optionTitle}>Wide Mode (High Sensitivity)</Text>
-            <Text style={styles.optionDesc}>Captures faint, distant ambient sounds like sirens or doorbells.</Text>
-          </View>
-        </TouchableOpacity>
-      </View>
-
-      {/* VIBRATION INTENSITY */}
-      <Text style={styles.sectionHeader}>Vibration Haptic Feedback</Text>
-      <View style={styles.card}>
-        <Text style={styles.cardSubtext}>Select motor vibration intensity upon alert trigger:</Text>
-        <View style={styles.vibeButtonGroup}>
-          {['low', 'medium', 'high'].map((level) => (
-            <TouchableOpacity
-              key={level}
-              style={[
-                styles.vibeButton,
-                vibrationIntensity === level && styles.selectedVibeButton
-              ]}
-              onPress={() => handleVibrationChange(level)}
-            >
-              <Text style={[
-                styles.vibeButtonText,
-                vibrationIntensity === level && styles.selectedVibeText
-              ]}>
-                {level.toUpperCase()}
+            <View style={styles.valueDisplayRow}>
+              <Text style={styles.valueText}>Level {vibrationIntensity}</Text>
+              <Text style={styles.valueSub}>
+                {vibrationIntensity === 1 ? 'Soft' : vibrationIntensity === 5 ? 'Max' : 'Medium'}
               </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </View>
+            </View>
 
-      {saving && <ActivityIndicator color="#38BDF8" style={{ marginTop: 15 }} />}
-    </ScrollView>
+            <Slider
+              style={styles.slider}
+              minimumValue={1}
+              maximumValue={5}
+              step={1}
+              value={vibrationIntensity}
+              onValueChange={setVibrationIntensity}
+              minimumTrackTintColor="#38BDF8"
+              maximumTrackTintColor="#334155"
+              thumbTintColor="#38BDF8"
+            />
+          </View>
+
+          {/* Sound Threshold */}
+          <View style={styles.card}>
+            <View style={styles.cardTitleRow}>
+              <Ionicons name="volume-medium-outline" size={22} color="#38BDF8" />
+              <Text style={styles.cardTitle}>Sound Sensitivity Threshold</Text>
+            </View>
+            <Text style={styles.cardSubtext}>
+              Minimum decibel (dB) volume required to trigger a directional alert.
+            </Text>
+
+            <View style={styles.valueDisplayRow}>
+              <Text style={styles.valueText}>{soundThreshold} dB</Text>
+              <Text style={styles.valueSub}>
+                {soundThreshold < 55 ? 'High Sensitivity' : soundThreshold > 75 ? 'Low Sensitivity' : 'Balanced'}
+              </Text>
+            </View>
+
+            <Slider
+              style={styles.slider}
+              minimumValue={40}
+              maximumValue={90}
+              step={5}
+              value={soundThreshold}
+              onValueChange={setSoundThreshold}
+              minimumTrackTintColor="#38BDF8"
+              maximumTrackTintColor="#334155"
+              thumbTintColor="#38BDF8"
+            />
+          </View>
+
+          {/* Toggles */}
+          <View style={styles.card}>
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleTextContainer}>
+                <Text style={styles.toggleTitle}>Haptic Feedback</Text>
+                <Text style={styles.toggleSub}>Vibrate phone screen along with wristband</Text>
+              </View>
+              <Switch
+                value={hapticFeedback}
+                onValueChange={setHapticFeedback}
+                trackColor={{ false: '#334155', true: '#38BDF8' }}
+                thumbColor="#F8FAFC"
+              />
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleTextContainer}>
+                <Text style={styles.toggleTitle}>Directional LED Lights</Text>
+                <Text style={styles.toggleSub}>Flash directional LEDs on the physical device</Text>
+              </View>
+              <Switch
+                value={ledIndicators}
+                onValueChange={setLedIndicators}
+                trackColor={{ false: '#334155', true: '#38BDF8' }}
+                thumbColor="#F8FAFC"
+              />
+            </View>
+          </View>
+
+          {/* Save Action */}
+          <TouchableOpacity style={styles.applyButton} onPress={handleSaveSettings} disabled={saving}>
+            {saving ? (
+              <ActivityIndicator color="#0F172A" />
+            ) : (
+              <Text style={styles.applyButtonText}>Apply Settings to Device</Text>
+            )}
+          </TouchableOpacity>
+        </ScrollView>
+      )}
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, paddingTop: 50, backgroundColor: '#0f172a' },
-  backButton: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
-  backText: { color: '#38BDF8', fontSize: 16, fontWeight: '600', marginLeft: 8 },
-  title: { fontSize: 22, fontWeight: 'bold', color: '#fff', marginBottom: 20 },
-  sectionHeader: { fontSize: 15, fontWeight: 'bold', color: '#94A3B8', marginTop: 15, marginBottom: 8 },
-  card: { backgroundColor: '#1e293b', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#334155' },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  cardTitle: { fontSize: 16, fontWeight: 'bold', color: '#fff' },
-  cardSubtext: { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  optionCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0f172a', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#334155' },
-  selectedOptionCard: { borderColor: '#38BDF8', backgroundColor: '#0c4a6e' },
-  optionTextContainer: { marginLeft: 12, flex: 1 },
-  optionTitle: { fontSize: 14, fontWeight: 'bold', color: '#fff' },
-  optionDesc: { fontSize: 11, color: '#94a3b8', marginTop: 2 },
-  vibeButtonGroup: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 },
-  vibeButton: { flex: 1, backgroundColor: '#0f172a', paddingVertical: 12, marginHorizontal: 4, borderRadius: 8, alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
-  selectedVibeButton: { backgroundColor: '#0284c7', borderColor: '#38BDF8' },
-  vibeButtonText: { color: '#94a3b8', fontWeight: 'bold', fontSize: 12 },
-  selectedVibeText: { color: '#fff' }
+  container: {
+    flex: 1,
+    backgroundColor: '#0F172A',
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 5 : 0,
+  },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+  },
+  backButton: {
+    padding: 4,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#F8FAFC',
+  },
+  saveHeaderBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  saveHeaderText: {
+    color: '#38BDF8',
+    fontWeight: 'bold',
+    fontSize: 15,
+  },
+  scrollContent: {
+    padding: 20,
+  },
+  card: {
+    backgroundColor: '#1E293B',
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    marginBottom: 16,
+  },
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  cardTitle: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#F8FAFC',
+  },
+  cardSubtext: {
+    fontSize: 12,
+    color: '#94A3B8',
+    marginBottom: 16,
+  },
+  valueDisplayRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    marginBottom: 8,
+  },
+  valueText: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#38BDF8',
+  },
+  valueSub: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  slider: {
+    width: '100%',
+    height: 40,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  toggleTextContainer: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  toggleTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#F8FAFC',
+  },
+  toggleSub: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#334155',
+    marginVertical: 12,
+  },
+  applyButton: {
+    backgroundColor: '#38BDF8',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  applyButtonText: {
+    color: '#0F172A',
+    fontWeight: 'bold',
+    fontSize: 15,
+  },
 });
