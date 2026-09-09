@@ -64,7 +64,6 @@ export default function AlertsScreen({ navigation, userId }) {
   const fetchAlerts = async () => {
     if (!userId) return;
 
-    // Convert userId to Number in case it is passed as a string
     const numericUserId = Number(userId);
 
     const { data, error } = await supabase
@@ -143,18 +142,18 @@ export default function AlertsScreen({ navigation, userId }) {
 
   const monthsList = [
     { label: 'All Months', value: 'ALL' },
-    { label: 'Jan (1)', value: '1' },
-    { label: 'Feb (2)', value: '2' },
-    { label: 'Mar (3)', value: '3' },
-    { label: 'Apr (4)', value: '4' },
-    { label: 'May (5)', value: '5' },
-    { label: 'Jun (6)', value: '6' },
-    { label: 'Jul (7)', value: '7' },
-    { label: 'Aug (8)', value: '8' },
-    { label: 'Sep (9)', value: '9' },
-    { label: 'Oct (10)', value: '10' },
-    { label: 'Nov (11)', value: '11' },
-    { label: 'Dec (12)', value: '12' }
+    { label: 'Jan', value: '1' },
+    { label: 'Feb', value: '2' },
+    { label: 'Mar', value: '3' },
+    { label: 'Apr', value: '4' },
+    { label: 'May', value: '5' },
+    { label: 'Jun', value: '6' },
+    { label: 'Jul', value: '7' },
+    { label: 'Aug', value: '8' },
+    { label: 'Sep', value: '9' },
+    { label: 'Oct', value: '10' },
+    { label: 'Nov', value: '11' },
+    { label: 'Dec', value: '12' }
   ];
 
   const severityList = ['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
@@ -180,37 +179,58 @@ export default function AlertsScreen({ navigation, userId }) {
       <Text style={styles.header}>Real-Time Sound Alerts</Text>
       <Text style={styles.subHeader}>Live log of target ambient sounds identified by SonoBand</Text>
 
-      {/* Severity Filter ScrollView */}
-      <Text style={styles.filterLabel}>Type / Severity:</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar}>
-        {severityList.map((sev) => (
-          <TouchableOpacity
-            key={sev}
-            style={[styles.filterChip, selectedSeverity === sev && styles.activeFilterChip]}
-            onPress={() => setSelectedSeverity(sev)}
-          >
-            <Text style={[styles.filterChipText, selectedSeverity === sev && styles.activeFilterText]}>
-              {sev}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+      {/* Redesigned Filter Toolbar */}
+      <View style={styles.filterSectionContainer}>
+        {/* Severity Filter Row */}
+        <View style={styles.filterGroupHeader}>
+          <Ionicons name="options-outline" size={14} color="#94A3B8" style={{ marginRight: 4 }} />
+          <Text style={styles.filterLabel}>Type / Severity</Text>
+        </View>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.filterBar}
+          contentContainerStyle={styles.filterScrollContent}
+        >
+          {severityList.map((sev) => (
+            <TouchableOpacity
+              key={sev}
+              activeOpacity={0.7}
+              style={[styles.filterChip, selectedSeverity === sev && styles.activeFilterChip]}
+              onPress={() => setSelectedSeverity(sev)}
+            >
+              <Text style={[styles.filterChipText, selectedSeverity === sev && styles.activeFilterText]}>
+                {sev}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
 
-      {/* Month Filter ScrollView */}
-      <Text style={styles.filterLabel}>Month:</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar}>
-        {monthsList.map((m) => (
-          <TouchableOpacity
-            key={m.value}
-            style={[styles.filterChip, selectedMonth === m.value && styles.activeFilterChip]}
-            onPress={() => setSelectedMonth(m.value)}
-          >
-            <Text style={[styles.filterChipText, selectedMonth === m.value && styles.activeFilterText]}>
-              {m.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+        {/* Month Filter Row */}
+        <View style={styles.filterGroupHeader}>
+          <Ionicons name="calendar-outline" size={14} color="#94A3B8" style={{ marginRight: 4 }} />
+          <Text style={styles.filterLabel}>Month</Text>
+        </View>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.filterBar}
+          contentContainerStyle={styles.filterScrollContent}
+        >
+          {monthsList.map((m) => (
+            <TouchableOpacity
+              key={m.value}
+              activeOpacity={0.7}
+              style={[styles.filterChip, selectedMonth === m.value && styles.activeFilterChip]}
+              onPress={() => setSelectedMonth(m.value)}
+            >
+              <Text style={[styles.filterChipText, selectedMonth === m.value && styles.activeFilterText]}>
+                {m.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
 
       {/* Alert List */}
       <FlatList
@@ -299,21 +319,42 @@ const styles = StyleSheet.create({
   backText: { color: '#38BDF8', fontSize: 16, fontWeight: '600', marginLeft: 8 },
   markAllText: { color: '#38BDF8', fontSize: 13, fontWeight: '600' },
   header: { fontSize: 22, color: '#FFF', fontWeight: 'bold', marginBottom: 4 },
-  subHeader: { fontSize: 13, color: '#94A3B8', marginBottom: 12 },
-  filterLabel: { color: '#94A3B8', fontSize: 11, fontWeight: '700', marginBottom: 6 },
-  filterBar: { flexGrow: 0, marginBottom: 12 },
-  filterChip: {
+  subHeader: { fontSize: 13, color: '#94A3B8', marginBottom: 16 },
+  
+  /* Filter Container Section */
+  filterSectionContainer: {
     backgroundColor: '#1E293B',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    marginRight: 8,
+    borderRadius: 12,
+    paddingVertical: 10,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: '#334155'
+  },
+  filterGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    marginBottom: 6
+  },
+  filterLabel: { color: '#94A3B8', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
+  filterBar: { flexGrow: 0, marginBottom: 8 },
+  filterScrollContent: { paddingHorizontal: 12, alignItems: 'center' },
+  filterChip: {
+    backgroundColor: '#0F172A',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    justifyContent: 'center',
+    alignItems: 'center'
   },
   activeFilterChip: { backgroundColor: '#38BDF8', borderColor: '#38BDF8' },
   filterChipText: { color: '#94A3B8', fontSize: 12, fontWeight: '600' },
   activeFilterText: { color: '#0F172A', fontWeight: 'bold' },
+
+  /* List & Cards */
   card: { backgroundColor: '#1E293B', padding: 16, borderRadius: 14, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
   unreadCard: { borderColor: '#38BDF8' },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
@@ -328,7 +369,7 @@ const styles = StyleSheet.create({
   typeBadgeText: { fontSize: 11, fontWeight: '800' },
   statusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
   statusText: { fontSize: 10, fontWeight: '700' },
-  emptyCard: { backgroundColor: '#1E293B', padding: 30, borderRadius: 12, alignItems: 'center', marginTop: 20, borderWidth: 1, borderColor: '#334155' },
+  emptyCard: { backgroundColor: '#1E293B', padding: 30, borderRadius: 12, alignItems: 'center', marginTop: 10, borderWidth: 1, borderColor: '#334155' },
   emptyText: { color: '#F8FAFC', fontSize: 16, fontWeight: 'bold', marginTop: 12 },
   emptySubtext: { color: '#64748B', fontSize: 12, textAlign: 'center', marginTop: 4 }
 });

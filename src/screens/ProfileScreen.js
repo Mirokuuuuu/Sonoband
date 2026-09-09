@@ -14,10 +14,11 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { decode } from 'base64-arraybuffer';
-import { supabase } from '../services/supabaseClient';
+import { supabase, logSystemActivity } from '../services/supabaseClient';
 
 const isValidUuid = (id) => {
   if (!id) return false;
@@ -35,8 +36,14 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [role, setRole] = useState('user');
   const [avatarUrl, setAvatarUrl] = useState(null);
   const [coords, setCoords] = useState({ latitude: 0.0, longitude: 0.0 });
+
+  const rolesList = [
+    { label: 'Patient / User', value: 'user', icon: 'account' },
+    { label: 'Caregiver', value: 'caregiver', icon: 'heart-pulse' },
+  ];
 
   useEffect(() => {
     fetchUserProfile();
@@ -74,25 +81,33 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
 
       const realAuthUuid = currentAuthUser?.id || (isValidUuid(targetUserId) ? targetUserId : null);
       setAuthUuid(realAuthUuid);
-      setActiveUserId(targetUserId);
 
-      const { data: userData, error: userError } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', targetUserId)
-        .maybeSingle();
+      let query = supabase.from('users').select('*');
+      if (isValidUuid(targetUserId)) {
+        query = query.eq('uuid', targetUserId);
+      } else if (!isNaN(Number(targetUserId))) {
+        query = query.eq('id', Number(targetUserId));
+      } else if (realAuthUuid) {
+        query = query.eq('uuid', realAuthUuid);
+      }
+
+      const { data: userData, error: userError } = await query.maybeSingle();
 
       if (userError) console.warn('users table fetch warning:', userError.message);
 
       if (userData) {
+        setActiveUserId(userData.id);
+        if (userData.uuid) setAuthUuid(userData.uuid);
         if (userData.name || userData.full_name) setFullName(userData.name || userData.full_name);
         if (userData.email) setEmail(userData.email);
         if (userData.avatar_url) setAvatarUrl(userData.avatar_url);
+        if (userData.role) setRole(userData.role);
 
         const userPhone = userData.phone_number || userData.phone || userData.contact_number;
         if (userPhone) setPhone(userPhone);
-      } else if (currentAuthUser?.email) {
-        setEmail(currentAuthUser.email);
+      } else {
+        setActiveUserId(targetUserId);
+        if (currentAuthUser?.email) setEmail(currentAuthUser.email);
       }
 
       const lookupUuid = realAuthUuid || (isValidUuid(targetUserId) ? targetUserId : null);
@@ -177,15 +192,17 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
       const freshPublicUrl = `${publicUrlData.publicUrl}?t=${Date.now()}`;
       setAvatarUrl(freshPublicUrl);
 
-      if (activeUserId) {
+      if (activeUserId && !isNaN(Number(activeUserId))) {
         await supabase
           .from('users')
           .update({
             name: fullName.trim(),
             avatar_url: freshPublicUrl,
             phone_number: phone.trim(),
+            email: email.trim().toLowerCase(),
+            role: role,
           })
-          .eq('id', activeUserId);
+          .eq('id', Number(activeUserId));
       }
 
       const targetUuid = authUuid || (isValidUuid(activeUserId) ? activeUserId : null);
@@ -214,6 +231,20 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         );
       }
 
+      // Audit Log for Avatar Update
+      try {
+        await logSystemActivity(
+          activeUserId,
+          'update_profile',
+          'Updated profile picture',
+          { role: role, ipAddress: 'Mobile App' },
+          fullName,
+          email
+        );
+      } catch (aErr) {
+        console.log('Avatar audit skipped:', aErr.message);
+      }
+
       Alert.alert('Success', 'Profile photo updated successfully!');
     } catch (err) {
       console.error('Avatar upload error:', err.message || err);
@@ -224,11 +255,20 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
   };
 
   const handleSaveProfile = async () => {
-    if (!fullName.trim() || !phone.trim()) {
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedName = fullName.trim();
+    const trimmedPhone = phone.trim();
+
+    if (!trimmedName || !trimmedPhone || !trimmedEmail) {
       Alert.alert(
         'Incomplete Information',
-        'Please fill in both Full Name and Phone Number before saving.'
+        'Please fill in all required fields (Name, Email, and Phone Number) before saving.'
       );
+      return;
+    }
+
+    if (!trimmedEmail.endsWith('@gmail.com') || trimmedEmail === '@gmail.com') {
+      Alert.alert('Invalid Email Domain', 'Please enter a valid @gmail.com address.');
       return;
     }
 
@@ -240,15 +280,17 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
     try {
       setSaving(true);
 
-      if (activeUserId) {
+      if (activeUserId && !isNaN(Number(activeUserId))) {
         const { error: userError } = await supabase
           .from('users')
           .update({
-            name: fullName.trim(),
+            name: trimmedName,
+            email: trimmedEmail,
+            role: role,
             avatar_url: avatarUrl,
-            phone_number: phone.trim(),
+            phone_number: trimmedPhone,
           })
-          .eq('id', activeUserId);
+          .eq('id', Number(activeUserId));
 
         if (userError) console.warn('users update warning:', userError.message);
       }
@@ -268,8 +310,8 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         const { error: locError } = await supabase.from('user_locations').upsert(
           {
             user_id: targetUuid,
-            full_name: fullName.trim(),
-            phone_number: phone.trim(),
+            full_name: trimmedName,
+            phone_number: trimmedPhone,
             avatar_url: avatarUrl,
             latitude: finalLat,
             longitude: finalLng,
@@ -281,6 +323,20 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
         if (locError) throw locError;
       }
 
+      // Audit Log for Profile Save
+      try {
+        await logSystemActivity(
+          activeUserId,
+          'update_profile',
+          'Updated profile details',
+          { role: role, ipAddress: 'Mobile App' },
+          trimmedName,
+          trimmedEmail
+        );
+      } catch (aErr) {
+        console.log('Profile save audit skipped:', aErr.message);
+      }
+
       Alert.alert('Success', 'Profile details updated successfully!');
     } catch (err) {
       console.error('Save profile error:', err.message);
@@ -290,11 +346,19 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
     }
   };
 
+  // UPDATED BACK BUTTON NAVIGATION LOGIC
   const handleBackNavigation = () => {
-    if (navigation && typeof navigation.goBack === 'function') {
+    const passedRole = route?.params?.userRole;
+    const isCaregiver = passedRole === 'caregiver' || role === 'caregiver';
+
+    if (onNavigate) {
+      if (isCaregiver) {
+        onNavigate('caregiverDashboard');
+      } else {
+        onNavigate('dashboard');
+      }
+    } else if (navigation && typeof navigation.goBack === 'function') {
       navigation.goBack();
-    } else if (onNavigate) {
-      onNavigate('dashboard');
     }
   };
 
@@ -357,6 +421,18 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
 
           <Text style={styles.profileName}>{fullName || 'Sonoband User'}</Text>
           <Text style={styles.profileEmail}>{email || 'No gmail associated'}</Text>
+
+          <View style={styles.roleHeaderBadge}>
+            <MaterialCommunityIcons 
+              name={role === 'caregiver' ? 'heart-pulse' : 'account'} 
+              size={14} 
+              color="#38BDF8" 
+              style={{ marginRight: 4 }} 
+            />
+            <Text style={styles.roleHeaderBadgeText}>
+              {role === 'caregiver' ? 'CAREGIVER' : 'PATIENT / USER'}
+            </Text>
+          </View>
         </View>
 
         <View style={styles.card}>
@@ -371,12 +447,41 @@ export default function ProfileScreen({ route, navigation, onNavigate, userId: p
             placeholderTextColor="#64748B"
           />
 
-          <Text style={styles.inputLabel}>Gmail Address (Read Only)</Text>
+          <Text style={styles.inputLabel}>Gmail Address *</Text>
           <TextInput
-            style={[styles.input, styles.readOnlyInput]}
+            style={styles.input}
             value={email}
-            editable={false}
+            onChangeText={setEmail}
+            placeholder="user@gmail.com"
+            placeholderTextColor="#64748B"
+            autoCapitalize="none"
+            keyboardType="email-address"
           />
+
+          <Text style={styles.inputLabel}>Account Role *</Text>
+          <View style={styles.roleContainer}>
+            {rolesList.map((item) => {
+              const isSelected = role === item.value;
+              return (
+                <TouchableOpacity
+                  key={item.value}
+                  activeOpacity={0.8}
+                  style={[styles.roleChip, isSelected && styles.activeRoleChip]}
+                  onPress={() => setRole(item.value)}
+                >
+                  <MaterialCommunityIcons 
+                    name={item.icon} 
+                    size={18} 
+                    color={isSelected ? '#0F172A' : '#94A3B8'} 
+                    style={{ marginRight: 6 }} 
+                  />
+                  <Text style={[styles.roleChipText, isSelected && styles.activeRoleChipText]}>
+                    {item.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
 
           <Text style={styles.inputLabel}>Phone Number *</Text>
           <TextInput
@@ -500,6 +605,23 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     marginTop: 2,
   },
+  roleHeaderBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+  },
+  roleHeaderBadgeText: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 16,
@@ -530,8 +652,34 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 16,
   },
-  readOnlyInput: {
-    opacity: 0.6,
-    backgroundColor: '#1E293B',
+  roleContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  roleChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F172A',
+    paddingVertical: 12,
+    marginHorizontal: 4,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  activeRoleChip: {
+    backgroundColor: '#38BDF8',
+    borderColor: '#38BDF8',
+  },
+  roleChipText: {
+    color: '#94A3B8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  activeRoleChipText: {
+    color: '#0F172A',
+    fontWeight: '800',
   },
 });

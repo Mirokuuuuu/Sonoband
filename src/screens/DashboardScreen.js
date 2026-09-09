@@ -11,7 +11,7 @@ import {
   Alert,
   Modal
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, Feather } from '@expo/vector-icons';
 import * as Battery from 'expo-battery';
 import { supabase } from '../services/supabaseClient';
 
@@ -72,6 +72,12 @@ export default function DashboardScreen({
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
   const [deviceIp, setDeviceIp] = useState(null);
 
+  const navigateTo = (screen, params = {}) => {
+    if (navigation && typeof navigation.navigate === 'function') {
+      navigation.navigate(screen, { userId, ...params });
+    }
+  };
+
   const checkProfileCompletion = async () => {
     if (!userId) return;
     try {
@@ -97,7 +103,7 @@ export default function DashboardScreen({
             `Please update your account details to keep your information up to date.\n\nMissing Information:\n${missingFields.join('\n')}`,
             [
               { text: "Later", style: "cancel", onPress: () => { hasDismissedProfileAlert = true; } },
-              { text: "Update Now", onPress: () => navigateToProfile() }
+              { text: "Update Now", onPress: () => navigateTo('profile') }
             ]
           );
         }
@@ -230,20 +236,15 @@ export default function DashboardScreen({
     }
   };
 
-  const navigateToProfile = () => {
-    if (navigation && typeof navigation.navigate === 'function') {
-      navigation.navigate('profile', { userId });
-    }
-  };
-
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+      
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         
         {/* HEADER AREA */}
         <View style={styles.header}>
-          <TouchableOpacity style={styles.userInfo} onPress={navigateToProfile} activeOpacity={0.7}>
+          <TouchableOpacity style={styles.userInfo} onPress={() => navigateTo('profile')} activeOpacity={0.7}>
             <View style={styles.avatarPlaceholder}>
               <Text style={styles.avatarText}>{userName ? userName.charAt(0).toUpperCase() : 'U'}</Text>
             </View>
@@ -253,7 +254,7 @@ export default function DashboardScreen({
             </View>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.notifBell} onPress={() => navigation && navigation.navigate('Notifications')}>
+          <TouchableOpacity style={styles.notifBell} onPress={() => navigateTo('Notifications')}>
             <Text style={{ fontSize: 11, fontWeight: 'bold', color: '#38BDF8' }}>NOTIF</Text>
             <View style={styles.redBadge} />
           </TouchableOpacity>
@@ -275,7 +276,7 @@ export default function DashboardScreen({
 
           <TouchableOpacity 
             style={[styles.bentoCard, styles.largeCard]}
-            onPress={() => navigation && navigation.navigate('DevicePairing', { userId })}
+            onPress={() => navigateTo('DevicePairing')}
           >
             <Text 
               style={[
@@ -292,9 +293,10 @@ export default function DashboardScreen({
           </TouchableOpacity>
         </View>
 
+        {/* DEVICE CONTROLS / SETTINGS CARD */}
         <TouchableOpacity 
           style={[styles.bentoCard, styles.fullWidthCard]}
-          onPress={() => navigation && navigation.navigate('DeviceControl')}
+          onPress={() => navigateTo('Settings')}
         >
           <View style={styles.cardHeaderRow}>
             <Text style={styles.cardTitle}>Device Controls</Text>
@@ -329,7 +331,7 @@ export default function DashboardScreen({
 
           <TouchableOpacity 
             style={[styles.bentoCard, styles.squareBoxCard]} 
-            onPress={() => navigation && navigation.navigate('SoundManual')}
+            onPress={() => navigateTo('SoundManual')}
           >
             <Ionicons name="volume-high-outline" size={28} color="#38BDF8" style={{ marginBottom: 8 }} />
             <Text style={styles.cardTitle}>Core Sound Reference</Text>
@@ -337,50 +339,30 @@ export default function DashboardScreen({
           </TouchableOpacity>
         </View>
 
-        {/* QUICK NAVIGATION */}
-        <Text style={[styles.mainTitle, { marginTop: 15 }]}>Quick Navigation</Text>
-
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={navigateToProfile}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>My Profile & Account</Text>
-            <Text style={styles.cardActionText}>EDIT ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>Update avatar, personal details & contact info</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={() => navigation && navigation.navigate('GroupManagement')}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>Family Group & Live GPS</Text>
-            <Text style={styles.cardActionText}>VIEW GROUPS ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>Manage family groups, view maps & members</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={() => navigation && navigation.navigate('Alerts')}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>Sound Direction & AI Alerts</Text>
-            <Text style={styles.cardActionText}>ALERTS ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>Directional sound estimation logs</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={() => navigation && navigation.navigate('Notifications')}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>Audit Logs & Notifications</Text>
-            <Text style={styles.cardActionText}>LOGS ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>System activity & login history</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={[styles.bentoCard, styles.fullWidthCard]} onPress={() => navigation && navigation.navigate('Settings')}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>System Settings</Text>
-            <Text style={styles.cardActionText}>ACCOUNT ›</Text>
-          </View>
-          <Text style={styles.cardSubtext}>Manage user profile & settings</Text>
-        </TouchableOpacity>
-
       </ScrollView>
+
+      {/* 4 MAIN BOTTOM NAVIGATION BUTTONS */}
+      <View style={styles.bottomNav}>
+        <TouchableOpacity style={styles.navItem} onPress={() => navigateTo('dashboard')}>
+          <Feather name="home" size={22} color="#38BDF8" />
+          <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.navItem} onPress={() => navigateTo('Notifications')}>
+          <Feather name="bell" size={22} color="#94A3B8" />
+          <Text style={styles.navText}>Notifications</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.navItem} onPress={() => navigateTo('profile')}>
+          <Feather name="user" size={22} color="#94A3B8" />
+          <Text style={styles.navText}>Profile</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.navItem} onPress={() => navigateTo('Settings')}>
+          <Feather name="settings" size={22} color="#94A3B8" />
+          <Text style={styles.navText}>Settings</Text>
+        </TouchableOpacity>
+      </View>
 
       <DashboardTutorialModal visible={showTutorial} onClose={() => setShowTutorial(false)} />
     </SafeAreaView>
@@ -389,7 +371,7 @@ export default function DashboardScreen({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A', paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 5 : 0 },
-  scrollContent: { padding: 20 },
+  scrollContent: { padding: 20, paddingBottom: 90 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   userInfo: { flexDirection: 'row', alignItems: 'center' },
   avatarPlaceholder: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#38BDF8', justifyContent: 'center', alignItems: 'center' },
@@ -416,7 +398,13 @@ const styles = StyleSheet.create({
   onBar: { backgroundColor: '#064E3B', borderColor: '#059669' },
   offBar: { backgroundColor: '#451A03', borderColor: '#D97706' },
   toggleBarText: { fontSize: 14, fontWeight: 'bold', color: '#F8FAFC' },
-  statusDot: { width: 12, height: 12, borderRadius: 6 }
+  statusDot: { width: 12, height: 12, borderRadius: 6 },
+  
+  // Bottom Navigation Bar Styles
+  bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: '#1E293B', flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#334155', paddingHorizontal: 8 },
+  navItem: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 6 },
+  navText: { fontSize: 11, fontWeight: '600', color: '#94A3B8', marginTop: 3, textAlign: 'center' },
+  activeNavText: { color: '#38BDF8', fontWeight: '700' },
 });
 
 const modalStyles = StyleSheet.create({

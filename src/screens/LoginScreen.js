@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-import { supabase } from '../services/supabaseClient';
+import { supabase, logSystemActivity } from '../services/supabaseClient';
 import bcrypt from 'react-native-bcrypt';
 
 bcrypt.setRandomFallback((len) => {
@@ -43,88 +43,137 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedPassword = password.trim();
 
+    // 1. Required fields check
     if (!trimmedEmail || !trimmedPassword) {
       Alert.alert('Required Fields', 'Please fill in both gmail and password.');
+      return;
+    }
+
+    // 2. Strict Gmail domain validation
+    if (!trimmedEmail.endsWith('@gmail.com')) {
+      Alert.alert('Invalid Account', 'Only Gmail addresses (@gmail.com) are supported.');
       return;
     }
 
     setLoading(true);
 
     try {
-      // 1. Establish an active Supabase Auth session
+      // 3. Establish Supabase Auth session
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email: trimmedEmail,
         password: trimmedPassword,
       });
 
-      // 2. Query custom user table record
-      const { data: userData, error: dbError } = await supabase
+      const authUuid = authData?.user?.id;
+
+      // 4. Query user record from public.users matching email OR linked uuid
+      let userData = null;
+      
+      const { data: userByEmail } = await supabase
         .from('users')
         .select('*')
         .eq('email', trimmedEmail)
         .maybeSingle();
 
-      let resolvedUserId = null;
-      let isPasswordMatch = false;
+      userData = userByEmail;
 
-      if (userData) {
-        resolvedUserId = userData.id !== undefined ? userData.id : userData.user_id;
-        // Verify via local bcrypt fallback if auth record was registered via DB script directly
-        isPasswordMatch = bcrypt.compareSync(trimmedPassword, userData.password);
+      if (!userData && authUuid) {
+        const { data: userByUuid } = await supabase
+          .from('users')
+          .select('*')
+          .eq('uuid', authUuid)
+          .maybeSingle();
+        userData = userByUuid;
       }
 
-      // Deny access if both Supabase Auth and manual database record fail
+      // Safe password comparison check
+      let isPasswordMatch = false;
+      if (userData?.password) {
+        try {
+          isPasswordMatch = bcrypt.compareSync(trimmedPassword, userData.password);
+        } catch (e) {
+          isPasswordMatch = false;
+        }
+      }
+
       if (authError && !isPasswordMatch) {
         Alert.alert('Access Denied', authError?.message || 'Invalid gmail or password.');
         setLoading(false);
         return;
       }
 
-      if (resolvedUserId === undefined || resolvedUserId === null) {
-        // Fallback: Use numeric hash/string if custom user ID is missing
-        resolvedUserId = authData?.user?.id || '1';
-      }
+      // 5. Resolve Integer Primary Key and Role
+      const resolvedUserId = userData?.id ? Number(userData.id) : null;
+      const activeRole = String(
+        userData?.role || 
+        authData?.user?.user_metadata?.role || 
+        'user'
+      ).toLowerCase().trim();
 
-      // 3. Save active User ID to local storage
-      await AsyncStorage.setItem('user_id', String(resolvedUserId));
+      // 6. Resolve Display Name from public.users or Metadata
+      const rawName = 
+        userData?.name ||
+        userData?.full_name ||
+        authData?.user?.user_metadata?.full_name ||
+        authData?.user?.user_metadata?.name;
 
-      // 4. Record active login audit event
+      const fallbackEmailPrefix = trimmedEmail.split('@')[0];
+      const resolvedName = rawName && String(rawName).trim() 
+        ? String(rawName).trim() 
+        : fallbackEmailPrefix;
+
+      const finalEmail = trimmedEmail || authData?.user?.email;
+
+      // 7. Save local session data
+      if (resolvedUserId) await AsyncStorage.setItem('user_id', String(resolvedUserId));
+      await AsyncStorage.setItem('user_role', activeRole);
+      await AsyncStorage.setItem('user_name', resolvedName);
+
+      // 8. Log System Activity (Single audit log entry)
       try {
-        await supabase
-          .from('audit_logs')
-          .insert([
-            {
-              user_id: Number(resolvedUserId) || null,
-              action: 'login',
-              details: 'User signed in successfully',
-            },
-          ]);
+        await logSystemActivity(
+          resolvedUserId,
+          'login',
+          'User signed in successfully',
+          {
+            role: activeRole,
+            ipAddress: 'Mobile Client',
+          },
+          resolvedName,
+          finalEmail
+        );
       } catch (auditErr) {
         console.log('Audit log skipped:', auditErr.message);
       }
 
-      // 5. Track connection status
+      // 9. Track device connection using Auth UUID
       try {
-        await supabase
-          .from('device_connections')
-          .insert([
-            {
-              user_id: resolvedUserId,
-              status: 'online',
-              timestamp: new Date().toISOString(),
-            },
-          ]);
+        const connectionUserId = authUuid || userData?.uuid;
+
+        if (connectionUserId) {
+          await supabase
+            .from('device_connections')
+            .insert([
+              {
+                user_id: connectionUserId,
+                status: 'online',
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+        }
       } catch (connErr) {
         console.log('Device connection log skipped:', connErr.message);
       }
 
       setLoading(false);
 
+      // 10. Delegate routing exclusively to onLoginSuccess
       if (onLoginSuccess) {
-        onLoginSuccess(resolvedUserId);
+        onLoginSuccess(resolvedUserId, activeRole);
+      } else {
+        const targetScreen = activeRole === 'caregiver' ? 'caregiverDashboard' : 'dashboard';
+        navigateTo(targetScreen, { userId: resolvedUserId, role: activeRole });
       }
-
-      navigateTo('Dashboard', { userId: resolvedUserId });
     } catch (error) {
       console.error('Login system error:', error);
       Alert.alert('System Error', 'Failed to authenticate user.');

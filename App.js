@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo'; 
-import { supabase, logSystemActivity } from './src/services/supabaseClient';
+import { supabase } from './src/services/supabaseClient';
 
 // Authentication Screens
 import LoginScreen from './src/screens/LoginScreen';
@@ -22,9 +22,16 @@ import ProfileScreen from './src/screens/ProfileScreen';
 import GroupManagementScreen from './src/screens/GroupManagementScreen';
 import SoundManualScreen from './src/screens/SoundManualScreen';
 
+// Caregiver Screens
+import CaregiverDashboard from './src/screens/CaregiverDashboard';
+import CaregiverNotificationsScreen from './src/screens/CaregiverNotificationsScreen';
+import AssignedPatientsScreen from './src/screens/AssignedPatientsScreen';
+
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState('login');
+  const [screenParams, setScreenParams] = useState({});
   const [userId, setUserId] = useState(null); 
+  const [userRole, setUserRole] = useState(null);
 
   const [forgotPasswordSource, setForgotPasswordSource] = useState('login');
 
@@ -36,116 +43,162 @@ export default function App() {
   
   const [notifications, setNotifications] = useState([]);
 
+  // Navigation Handler with Route Parameter Support
+  const handleNavigate = (screenName, params = {}) => {
+    const screenMapping = {
+      'Notifications': 'notifications',
+      'Notification': 'notifications',
+      'CaregiverNotifications': 'caregiverNotifications',
+      'caregiverNotifications': 'caregiverNotifications',
+      'AssignedPatients': 'assignedPatients',
+      'assignedPatients': 'assignedPatients',
+      'CaregiverDashboard': 'caregiverDashboard',
+      'caregiverDashboard': 'caregiverDashboard',
+      'Alerts': 'alerts',
+      'AlertLogs': 'alerts',
+      'FamilyGroup': 'familyGroup',
+      'GroupManagement': 'groupManagement',
+      'SoundManual': 'soundManual',
+      'FullscreenMap': 'fullscreenMap',
+      'FullScreenMap': 'fullscreenMap',
+      'Map': 'fullscreenMap',
+      'Settings': 'settings',
+      'DeviceControl': 'deviceControl', 
+      'DeviceSettings': 'deviceControl', 
+      'DevicePairing': 'devicePairing',
+      'Dashboard': 'dashboard',
+      'Login': 'login',
+      'Profile': 'profile',
+      'profile': 'profile'
+    };
+
+    const targetScreen = screenMapping[screenName] || screenName;
+    setScreenParams(params || {});
+    setCurrentScreen(targetScreen);
+  };
+
   // Universal Helper Navigation Adaptor
   const navigationAdapter = {
-    navigate: (screenName) => {
-      const screenMapping = {
-        'Notifications': 'notifications',
-        'Notification': 'notifications',
-        'Alerts': 'alerts',
-        'AlertLogs': 'alerts',
-        'FamilyGroup': 'familyGroup',
-        'GroupManagement': 'groupManagement',
-        'SoundManual': 'soundManual',
-        'FullscreenMap': 'fullscreenMap',
-        'FullScreenMap': 'fullscreenMap',
-        'Map': 'fullscreenMap',
-        'Settings': 'settings',
-        'DeviceControl': 'deviceControl', 
-        'DeviceSettings': 'deviceControl', 
-        'DevicePairing': 'devicePairing',
-        'Dashboard': 'dashboard',
-        'Login': 'login',
-        'Profile': 'profile',
-        'profile': 'profile'
-      };
-
-      const targetScreen = screenMapping[screenName] || screenName;
-      setCurrentScreen(targetScreen);
+    navigate: (screenName, params = {}) => {
+      handleNavigate(screenName, params);
     },
     goBack: () => {
+      setScreenParams({});
       if (currentScreen === 'fullscreenMap') {
         setCurrentScreen('familyGroup');
       } else if (currentScreen === 'familyGroup') {
         setCurrentScreen('groupManagement');
       } else if (currentScreen === 'login' || currentScreen === 'register') {
         setCurrentScreen('login');
+      } else if (
+        currentScreen === 'caregiverNotifications' || 
+        currentScreen === 'assignedPatients' ||
+        (currentScreen === 'profile' && userRole === 'caregiver') // <-- FIX: Direct Caregiver Profile Back-Navigation
+      ) {
+        setCurrentScreen('caregiverDashboard');
       } else {
-        setCurrentScreen('dashboard');
+        setCurrentScreen(userRole === 'caregiver' ? 'caregiverDashboard' : 'dashboard');
       }
     }
   };
 
-  // Helper function to convert session user into integer ID from custom 'users' table
+  // Helper function: Resolves custom integer ID and user role from public.users
   const fetchNumericUserId = async (authUser) => {
     if (!authUser) {
       setUserId(null);
-      return;
+      setUserRole(null);
+      return null;
     }
 
     try {
-      // Check custom users table by email
-      const { data: customUser } = await supabase
+      // 1. Try resolving using the 'uuid' bridge column first
+      let { data: userData } = await supabase
         .from('users')
-        .select('id')
-        .eq('email', authUser.email)
+        .select('id, role')
+        .eq('uuid', authUser.id)
         .maybeSingle();
 
-      if (customUser?.id) {
-        setUserId(Number(customUser.id));
-      } else {
-        const parsed = Number(authUser.id);
-        setUserId(!isNaN(parsed) ? parsed : null);
+      // 2. Fallback: Query by email if 'uuid' isn't populated yet
+      if (!userData && authUser.email) {
+        const { data: userByEmail } = await supabase
+          .from('users')
+          .select('id, role')
+          .eq('email', authUser.email)
+          .maybeSingle();
+        userData = userByEmail;
       }
+
+      if (userData?.id) {
+        const resolvedId = Number(userData.id);
+        const resolvedRole = String(userData.role || '').toLowerCase().trim();
+
+        setUserId(resolvedId);
+        setUserRole(resolvedRole);
+
+        return { id: resolvedId, role: resolvedRole };
+      }
+
+      setUserId(null);
+      setUserRole(null);
+      return null;
     } catch (err) {
       console.error('Failed to resolve custom integer user ID:', err);
+      setUserId(null);
+      setUserRole(null);
+      return null;
     }
   };
 
-  // Centralized login event logger
-  const handleUserLoginEvent = async (uid) => {
-    let numericId = null;
+  // Centralized login event logger & navigator
+  const handleUserLoginEvent = async (resolvedIdInput, resolvedRoleInput) => {
+    let numericId = typeof resolvedIdInput === 'number' ? resolvedIdInput : Number(resolvedIdInput);
+    let resolvedRole = resolvedRoleInput ? String(resolvedRoleInput).toLowerCase().trim() : userRole;
 
     try {
-      // Query custom users table for integer ID
-      const { data: userData } = await supabase
-        .from('users')
-        .select('id, name, email, role')
-        .or(`id.eq.${isNaN(Number(uid)) ? -1 : Number(uid)},email.eq.${uid}`)
-        .maybeSingle();
-
-      if (userData?.id) {
-        numericId = Number(userData.id);
-      } else if (!isNaN(Number(uid))) {
-        numericId = Number(uid);
+      if (isNaN(numericId) || !numericId || !resolvedRole) {
+        const { data: { session } } = await supabase.auth.getSession();
+        const userDetails = await fetchNumericUserId(session?.user);
+        if (userDetails) {
+          numericId = userDetails.id;
+          resolvedRole = userDetails.role;
+        }
+      } else {
+        setUserId(numericId);
+        setUserRole(resolvedRole);
       }
 
-      setUserId(numericId);
       logSystemEvent("User session validated.", "info");
-
-      if (numericId) {
-        await logSystemActivity(numericId, 'Login', 'User logged in to application', {
-          userName: userData?.name || userData?.email || 'User',
-          userEmail: userData?.email || '',
-          role: userData?.role || 'user',
-          ipAddress: Platform.OS === 'ios' ? 'iOS Device' : 'Android Device'
-        });
-      }
     } catch (err) {
-      console.log('Login event logging skipped:', err.message);
+      console.log('Login event setup skipped:', err.message);
     }
 
-    setCurrentScreen('dashboard');
+    if (resolvedRole === 'caregiver') {
+      handleNavigate('caregiverDashboard');
+    } else {
+      handleNavigate('dashboard');
+    }
   };
 
   // Auth Listener
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      fetchNumericUserId(session?.user);
-    }).catch(() => {});
+    const initSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        const userDetails = await fetchNumericUserId(session.user);
+        if (userDetails?.role === 'caregiver') {
+          handleNavigate('caregiverDashboard');
+        } else if (userDetails) {
+          handleNavigate('dashboard');
+        }
+      }
+    };
+
+    initSession();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      fetchNumericUserId(session?.user);
+      if (session?.user) {
+        fetchNumericUserId(session.user);
+      }
     });
 
     return () => subscription.unsubscribe();
@@ -160,8 +213,10 @@ export default function App() {
       console.log('Logout error:', err);
     } finally {
       setUserId(null);
+      setUserRole(null);
       setIsDeviceOn(false);
       setSyncState('IDLE');
+      setScreenParams({});
       setCurrentScreen('login');
     }
   };
@@ -187,12 +242,12 @@ export default function App() {
         return (
           <LoginScreen 
             navigation={navigationAdapter}
-            onNavigate={(screen) => {
+            onNavigate={(screen, params) => {
               if (screen === 'forgotPassword') {
                 setForgotPasswordSource('login');
-                setCurrentScreen('forgotPassword');
+                handleNavigate('forgotPassword', params);
               } else {
-                setCurrentScreen(screen);
+                handleNavigate(screen, params);
               }
             }} 
             onLoginSuccess={handleUserLoginEvent}
@@ -203,7 +258,7 @@ export default function App() {
         return (
           <RegisterScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
           />
         );
 
@@ -211,7 +266,7 @@ export default function App() {
         return (
           <ForgotPasswordScreen 
             navigation={navigationAdapter}
-            onNavigate={() => setCurrentScreen(forgotPasswordSource)} 
+            onNavigate={() => handleNavigate(forgotPasswordSource)} 
           />
         );
 
@@ -219,12 +274,44 @@ export default function App() {
         return (
           <DashboardScreen 
             navigation={navigationAdapter}
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             isPhoneConnected={isPhoneConnected}            
             isDeviceConnected={syncState === 'SUCCESS'}    
             isDeviceOn={isDeviceOn}                        
             userId={userId} 
             currentScreen={currentScreen}
+            route={{ params: screenParams }}
+          />
+        );
+
+      case 'caregiverDashboard':
+        return (
+          <CaregiverDashboard
+            navigation={navigationAdapter}
+            onNavigate={handleNavigate}
+            onLogout={handleLogout}
+            userId={userId}
+            route={{ params: screenParams }}
+          />
+        );
+
+      case 'caregiverNotifications':
+        return (
+          <CaregiverNotificationsScreen
+            navigation={navigationAdapter}
+            onNavigate={handleNavigate}
+            userId={userId}
+            route={{ params: screenParams }}
+          />
+        );
+
+      case 'assignedPatients':
+        return (
+          <AssignedPatientsScreen
+            navigation={navigationAdapter}
+            onNavigate={handleNavigate}
+            userId={userId}
+            route={{ params: screenParams }}
           />
         );
 
@@ -232,8 +319,9 @@ export default function App() {
         return (
           <ProfileScreen 
             userId={userId} 
-            onNavigate={(screen) => navigationAdapter.navigate(screen)}
+            onNavigate={(screen, params) => navigationAdapter.navigate(screen, params)}
             onLogout={handleLogout} 
+            route={{ params: screenParams }}
           />
         );
 
@@ -241,18 +329,19 @@ export default function App() {
         return (
           <SettingsScreen 
             navigation={navigationAdapter}
-            onNavigate={(screen) => {
+            onNavigate={(screen, params) => {
               if (screen === 'forgotPassword') {
                 setForgotPasswordSource('settings');
-                setCurrentScreen('forgotPassword');
+                handleNavigate('forgotPassword', params);
               } else if (screen === 'login') {
                 handleLogout();
               } else {
-                setCurrentScreen(screen);
+                handleNavigate(screen, params);
               }
             }}
             userId={userId}
             onLogout={handleLogout}
+            route={{ params: screenParams }}
           />
         );
 
@@ -261,7 +350,7 @@ export default function App() {
         return (
           <DeviceControlScreen 
             navigation={navigationAdapter}
-            onNavigate={setCurrentScreen}
+            onNavigate={handleNavigate}
             isDeviceOn={isDeviceOn}
             setIsDeviceOn={setIsDeviceOn}
             syncState={syncState}
@@ -269,6 +358,7 @@ export default function App() {
             isWifiConnected={isPhoneConnected}
             userId={userId}
             deviceIp={esp32IP}
+            route={{ params: screenParams }}
           />
         );
 
@@ -276,12 +366,13 @@ export default function App() {
         return (
           <DevicePairingScreen 
             navigation={navigationAdapter}
-            onNavigate={setCurrentScreen}
+            onNavigate={handleNavigate}
             syncState={syncState}
             setSyncState={setSyncState}
             deviceIp={esp32IP}
             setDeviceIp={setEsp32IP}
             userId={userId}
+            route={{ params: screenParams }}
             onSelectDevice={(device) => {
               setIsDeviceOn(false);
               setSyncState('SUCCESS');
@@ -298,8 +389,9 @@ export default function App() {
         return (
           <NotificationScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             userId={userId} 
+            route={{ params: screenParams }}
           />
         );
 
@@ -308,10 +400,11 @@ export default function App() {
         return (
           <AlertsScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             isWifiConnected={isPhoneConnected} 
             syncState={syncState} 
             userId={userId} 
+            route={{ params: screenParams }}
           />
         );
 
@@ -319,8 +412,9 @@ export default function App() {
         return (
           <FamilyGroupScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             userId={userId} 
+            route={{ params: screenParams }}
           />
         );
 
@@ -328,8 +422,10 @@ export default function App() {
         return (
           <GroupManagementScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             userId={userId} 
+            userRole={userRole}
+            route={{ params: screenParams }}
           />
         );
 
@@ -337,8 +433,9 @@ export default function App() {
         return (
           <SoundManualScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             userId={userId} 
+            route={{ params: screenParams }}
           />
         );
 
@@ -346,24 +443,37 @@ export default function App() {
         return (
           <FullscreenMapScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
+            route={{ params: screenParams }}
           />
         );
 
       default:
-        return userId ? (
-          <DashboardScreen 
-            navigation={navigationAdapter}
-            onNavigate={setCurrentScreen} 
-            isPhoneConnected={isPhoneConnected}            
-            isDeviceConnected={syncState === 'SUCCESS'}    
-            isDeviceOn={isDeviceOn}                        
-            userId={userId} 
-          />
-        ) : (
+        if (userId) {
+          return userRole === 'caregiver' ? (
+            <CaregiverDashboard
+              navigation={navigationAdapter}
+              onNavigate={handleNavigate}
+              onLogout={handleLogout}
+              userId={userId}
+              route={{ params: screenParams }}
+            />
+          ) : (
+            <DashboardScreen 
+              navigation={navigationAdapter}
+              onNavigate={handleNavigate} 
+              isPhoneConnected={isPhoneConnected}            
+              isDeviceConnected={syncState === 'SUCCESS'}    
+              isDeviceOn={isDeviceOn}                        
+              userId={userId} 
+              route={{ params: screenParams }}
+            />
+          );
+        }
+        return (
           <LoginScreen 
             navigation={navigationAdapter} 
-            onNavigate={setCurrentScreen} 
+            onNavigate={handleNavigate} 
             onLoginSuccess={handleUserLoginEvent}
           />
         );
