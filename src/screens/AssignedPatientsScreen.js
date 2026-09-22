@@ -6,28 +6,50 @@ import {
   FlatList,
   TouchableOpacity,
   ActivityIndicator,
-  SafeAreaView,
   StatusBar,
   Modal,
-  Platform,
   Alert
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { supabase, logSystemActivity } from '../services/supabaseClient';
 
 export default function AssignedPatientsScreen({ navigation, onNavigate, userId }) {
   const [patients, setPatients] = useState([]);
   const [loading, setLoading] = useState(true);
-  
+
   // Patient Alerts Modal State
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientAlerts, setPatientAlerts] = useState([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
 
+  // Resolves the current caregiver's integer user_id from public.users
+  const getActiveCaregiverId = async () => {
+    if (userId) return Number(userId);
+
+    const { data: userData } = await supabase.auth.getUser();
+    if (userData?.user?.email) {
+      const { data: customUser } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', userData.user.email)
+        .maybeSingle();
+
+      if (customUser?.id) return Number(customUser.id);
+    }
+    return null;
+  };
+
   const fetchAssignedPatients = useCallback(async () => {
     setLoading(true);
     try {
-      // Query caregiver_links joined with the users table
+      const caregiverId = await getActiveCaregiverId();
+      if (!caregiverId) {
+        setPatients([]);
+        return;
+      }
+
+      // Query caregiver_links foreign key joined with users table
       const { data, error } = await supabase
         .from('caregiver_links')
         .select(`
@@ -40,11 +62,11 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
             role
           )
         `)
-        .eq('caregiver_id', userId);
+        .eq('caregiver_id', caregiverId);
 
       if (error) throw error;
 
-      // Map and fetch latest notification for each patient
+      // Fetch latest notification for each patient from public.notifications
       const patientList = data || [];
       const formattedPatients = await Promise.all(
         patientList.map(async (item) => {
@@ -68,6 +90,7 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
             patientId: item.patient?.id,
             name: item.patient?.name || 'Unknown User',
             email: item.patient?.email || 'No email',
+            role: item.patient?.role || 'user',
             linkedAt: item.created_at,
             latestAlert: latestAlert || null
           };
@@ -84,12 +107,10 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
   }, [userId]);
 
   useEffect(() => {
-    if (userId) {
-      fetchAssignedPatients();
-    }
-  }, [userId, fetchAssignedPatients]);
+    fetchAssignedPatients();
+  }, [fetchAssignedPatients]);
 
-  // Fetch individual patient notification history from notifications table
+  // Fetch individual patient notification history
   const openPatientAlerts = async (patient) => {
     setSelectedPatient(patient);
     setAlertsLoading(true);
@@ -122,6 +143,7 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
           style: "destructive",
           onPress: async () => {
             try {
+              const caregiverId = await getActiveCaregiverId();
               const { error } = await supabase
                 .from('caregiver_links')
                 .delete()
@@ -129,9 +151,9 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
 
               if (error) throw error;
 
-              if (logSystemActivity) {
+              if (logSystemActivity && caregiverId) {
                 try {
-                  await logSystemActivity(userId, 'unlink_patient', `Unlinked member: ${identifier}`);
+                  await logSystemActivity(caregiverId, 'unlink_patient', `Unlinked member: ${identifier}`);
                 } catch (aErr) {
                   console.log("Audit log error:", aErr.message);
                 }
@@ -156,7 +178,6 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
     }
   };
 
-  // Map notification type or metadata to colors & icons
   const getSeverityBadge = (type) => {
     switch (type?.toLowerCase()) {
       case 'emergency':
@@ -197,7 +218,6 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
           </TouchableOpacity>
         </View>
 
-        {/* Notification / Alert Status Bar */}
         <View style={[styles.statusBox, { backgroundColor: badge.bg }]}>
           <Feather name={badge.icon} size={16} color={badge.color} />
           <Text style={[styles.statusText, { color: badge.color }]}>
@@ -205,7 +225,6 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
           </Text>
         </View>
 
-        {/* View Notification History Button */}
         <TouchableOpacity 
           style={styles.viewAlertsBtn} 
           onPress={() => openPatientAlerts(item)}
@@ -219,7 +238,7 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
       {/* Header */}
@@ -228,9 +247,11 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
           <Text style={styles.backButtonText}>Back</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Assigned Members</Text>
-        <TouchableOpacity onPress={fetchAssignedPatients} style={styles.refreshButton}>
-          <Feather name="refresh-cw" size={18} color="#38BDF8" />
-        </TouchableOpacity>
+        <View style={styles.headerRightActions}>
+          <TouchableOpacity onPress={fetchAssignedPatients} style={styles.actionBtn}>
+            <Feather name="refresh-cw" size={18} color="#38BDF8" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.content}>
@@ -301,12 +322,13 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0F172A', paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 0 },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
   backButton: { padding: 4 },
   backButtonText: { color: '#38BDF8', fontSize: 16, fontWeight: 'bold' },
   headerTitle: { color: '#F8FAFC', fontSize: 18, fontWeight: 'bold' },
-  refreshButton: { padding: 4 },
+  headerRightActions: { flexDirection: 'row', gap: 12 },
+  actionBtn: { padding: 4 },
   content: { flex: 1, padding: 16 },
   card: { backgroundColor: '#1E293B', padding: 16, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },

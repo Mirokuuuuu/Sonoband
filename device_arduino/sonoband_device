@@ -1,0 +1,674 @@
+sonoband_device.ino
+
+#include <WiFi.h>              
+#include <WiFiUdp.h>           
+#include <WebServer.h>         
+#include <HTTPClient.h>        
+#include <driver/i2s.h>        
+#include <Adafruit_GFX.h>      
+#include <Adafruit_ST7735.h>   
+#include <SPI.h>
+#include <ArduinoJson.h>       
+#include "icons.h"  
+
+// ================= COLOR DEFINITIONS =================
+#ifndef ST7735_DARKGREY
+  #define ST7735_DARKGREY 0x7BEF
+#endif
+#ifndef ST7735_CYAN
+  #define ST7735_CYAN     0x07FF
+#endif
+
+#define ST7735_DARKRED  0xB000
+
+// ================= USER WI-FI SETTINGS =================
+const char* ssid     = "Connect ka? Wag na!";     
+const char* password = "136722100143123";          
+
+// ================= SUPABASE API CONFIGURATION =================
+const char* supabaseUrl = "https://qdmwobrwokpczqwezjzs.supabase.co/rest/v1/alerts";
+const char* supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkbXdvYnJ3b2twY3pxd2V6anpzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyNjg1MDgsImV4cCI6MjA5Nzg0NDUwOH0.dDn4oJE78IcgDHX5U2FbhxHaHFWFbwqP0AbjT5AajY8";       
+
+// ================= NETWORK & UDP / HTTP SETTINGS =================
+const IPAddress broadcastIP(255, 255, 255, 255); 
+IPAddress appIP;                                  
+bool appIPKnown = false;
+const int udpPort = 8888;                          
+WiFiUDP udp;
+
+WebServer httpServer(5000); 
+
+unsigned long lastAnnounce = 0;
+const unsigned long ANNOUNCE_INTERVAL = 3000; 
+
+// ================= PIN DEFINITIONS =================
+#define TFT_CS   5
+#define TFT_DC   27
+#define TFT_RST  4
+#define TFT_SCLK 23  
+#define TFT_MOSI 18  
+
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
+#define I2S_SCK  22  
+#define I2S_WS   25  // Must be physically connected to GPIO 25!
+#define I2S_SD   34  
+#define I2S_PORT I2S_NUM_0
+
+#define VIB_MOTOR_PIN 32 
+#define BUFFER_SIZE 512
+int32_t i2sBuffer[BUFFER_SIZE];
+
+// ================= STATE VARIABLES =================
+bool deviceOn = false;              
+bool isConnectedToApp = false;     
+unsigned long lastHeartbeat = 0;   
+const unsigned long HEARTBEAT_TIMEOUT = 12000; 
+
+int noiseFloor = 400;            
+
+String currentLoggedInUser = ""; 
+int vibrationPwmValue = 165;     
+
+String activeSoundType = "Listening..."; 
+String currentDisplayLabel = "Ready to Detect";
+char currentDirectionChar = 'N'; 
+
+unsigned long lastAlertTime = 0;
+const unsigned long alertCooldown = 3000; 
+unsigned long displayResetTime = 0;
+unsigned long vibOffTime = 0;
+bool isVibrating = false;
+
+String lastRenderedLabel = "";
+char lastRenderedDir = '\0';
+
+// ================= FUNCTION PROTOTYPES =================
+void setupI2S();
+void setupHttpEndpoints();
+void updateFullDisplay(String label, char dir);
+void drawWelcomeScreen();
+void drawWaitingScreen(String msg);
+void drawConnectedScreen();
+void drawOffScreen();
+void sendWifiAlert(String direction, long amplitude, int32_t* rawBuffer, int bufferLength);
+void sendAlertToSupabase(String direction, long amplitude);
+void sendHandshakeResponse();
+void triggerVibration(int pwm, unsigned long durationMs = 200);
+void updateVibration();
+void applyCORS();
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  delay(1000); 
+  Serial.println("\n=== SONOBAND ESP32 INITIALIZING ===");
+
+  pinMode(VIB_MOTOR_PIN, OUTPUT);
+  analogWrite(VIB_MOTOR_PIN, 0);
+
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  tft.initR(INITR_MINI160x80); 
+  tft.invertDisplay(true);      
+  tft.setRotation(1);          
+
+  drawWelcomeScreen();
+  delay(1500);
+
+  drawWaitingScreen("Connecting WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n[Wi-Fi] Connected!");
+  Serial.print("[Wi-Fi] IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  setupI2S();
+  udp.begin(udpPort);
+  
+  setupHttpEndpoints();
+  httpServer.begin();
+  Serial.println("[HTTP] Command server active on port 5000.");
+
+  lastHeartbeat = millis(); 
+  drawWaitingScreen("Waiting for App...");
+  sendHandshakeResponse();
+}
+
+void applyCORS() {
+  httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+  httpServer.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  httpServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+// ================= HTTP HANDLERS =================
+void setupHttpEndpoints() {
+  httpServer.on("/connect", HTTP_OPTIONS, []() { applyCORS(); httpServer.send(204); });
+  httpServer.on("/disconnect", HTTP_OPTIONS, []() { applyCORS(); httpServer.send(204); });
+  httpServer.on("/config", HTTP_OPTIONS, []() { applyCORS(); httpServer.send(204); });
+  httpServer.on("/ping", HTTP_OPTIONS, []() { applyCORS(); httpServer.send(204); });
+
+  httpServer.on("/ping", HTTP_GET, []() {
+    lastHeartbeat = millis();
+    applyCORS();
+    httpServer.send(200, "application/json", "{\"status\":\"alive\"}");
+  });
+
+  httpServer.on("/connect", HTTP_POST, []() {
+    appIP = httpServer.client().remoteIP();
+    appIPKnown = true;
+    isConnectedToApp = true;
+    lastHeartbeat = millis();
+
+    drawConnectedScreen();
+    triggerVibration(100, 200);
+    delay(2000);
+
+    deviceOn = false;
+    drawOffScreen();
+
+    applyCORS();
+    httpServer.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Connected\"}");
+  });
+
+  httpServer.on("/disconnect", HTTP_POST, []() {
+    deviceOn = false;
+    isConnectedToApp = false;
+    drawWaitingScreen("Waiting for App...");
+    applyCORS();
+    httpServer.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Disconnected\"}");
+  });
+
+  httpServer.on("/config", HTTP_POST, []() {
+    appIP = httpServer.client().remoteIP();
+    appIPKnown = true;
+    lastHeartbeat = millis();
+    
+    if (httpServer.hasArg("plain")) {
+      String body = httpServer.arg("plain");
+      #if ARDUINOJSON_VERSION_MAJOR >= 7
+        JsonDocument doc;
+      #else
+        StaticJsonDocument<512> doc;
+      #endif
+      DeserializationError err = deserializeJson(doc, body);
+      if (!err) {
+        if (doc.containsKey("user_id")) {
+          if (doc["user_id"].is<int>()) {
+            currentLoggedInUser = String(doc["user_id"].as<int>());
+          } else {
+            currentLoggedInUser = doc["user_id"].as<String>();
+          }
+          Serial.print("[Config] Updated user_id: ");
+          Serial.println(currentLoggedInUser);
+        }
+
+        bool stateChanged = false;
+        bool targetState = deviceOn;
+
+        if (doc.containsKey("is_on")) {
+          targetState = doc["is_on"].as<bool>();
+          stateChanged = (targetState != deviceOn);
+        } else if (doc.containsKey("power")) {
+          String pwr = doc["power"].as<String>();
+          targetState = (pwr == "on" || pwr == "true");
+          stateChanged = (targetState != deviceOn);
+        }
+
+        if (stateChanged) {
+          deviceOn = targetState;
+          if (!deviceOn) {
+            drawOffScreen();
+          } else {
+            activeSoundType = "Listening...";
+            currentDisplayLabel = "Ready to Detect";
+            updateFullDisplay(currentDisplayLabel, 'N');
+            triggerVibration(100, 200);
+          }
+        }
+
+        if (doc.containsKey("vibration_intensity")) {
+          String vib = doc["vibration_intensity"].as<String>();
+          if (vib == "low") vibrationPwmValue = 80;
+          else if (vib == "high") vibrationPwmValue = 255;
+          else vibrationPwmValue = 165;
+        }
+        if (doc.containsKey("sensitivity")) {
+          String sens = doc["sensitivity"].as<String>();
+          noiseFloor = (sens == "broad" || sens == "wide") ? 800 : 1500;
+        } else if (doc.containsKey("sound_threshold")) {
+          String sens = doc["sound_threshold"].as<String>();
+          noiseFloor = (sens == "broad" || sens == "wide") ? 800 : 1500;
+        }
+      }
+    }
+    applyCORS();
+    httpServer.send(200, "application/json", "{\"status\":\"success\",\"config\":\"updated\"}");
+  });
+}
+
+// ================= MAIN LOOP =================
+void loop() {
+  httpServer.handleClient();
+  updateVibration();
+
+  if (millis() - lastAnnounce > ANNOUNCE_INTERVAL) {
+    sendHandshakeResponse();
+    lastAnnounce = millis();
+  }
+
+  int packetSize = udp.parsePacket();
+  if (packetSize > 0) {
+    appIP = udp.remoteIP();
+    appIPKnown = true;
+
+    char incoming[512];
+    int len = udp.read(incoming, 511);
+    if (len > 0) incoming[len] = 0;
+
+    #if ARDUINOJSON_VERSION_MAJOR >= 7
+      JsonDocument doc;
+    #else
+      StaticJsonDocument<512> doc;
+    #endif
+    DeserializationError error = deserializeJson(doc, incoming);
+
+    if (!error) {
+      lastHeartbeat = millis();
+
+      if (!isConnectedToApp) {
+        isConnectedToApp = true;
+        drawConnectedScreen();
+        triggerVibration(100, 200);
+        delay(2000);
+
+        deviceOn = false;
+        drawOffScreen();
+      }
+
+      bool stateChanged = false;
+      bool targetState = deviceOn;
+
+      if (doc.containsKey("is_on")) {
+        targetState = doc["is_on"].as<bool>();
+        stateChanged = (targetState != deviceOn);
+      } else if (doc.containsKey("power")) {
+        String pwr = doc["power"].as<String>();
+        targetState = (pwr == "on" || pwr == "true");
+        stateChanged = (targetState != deviceOn);
+      }
+
+      if (stateChanged) {
+        deviceOn = targetState;
+        if (!deviceOn) {
+          drawOffScreen();
+        } else {
+          activeSoundType = "Listening...";
+          currentDisplayLabel = "Ready to Detect";
+          updateFullDisplay(currentDisplayLabel, 'N');
+          triggerVibration(100, 200);
+        }
+      }
+
+      if (doc.containsKey("user_id")) {
+        if (doc["user_id"].is<int>()) {
+          currentLoggedInUser = String(doc["user_id"].as<int>());
+        } else {
+          currentLoggedInUser = doc["user_id"].as<String>();
+        }
+      }
+
+      if (doc.containsKey("detected_sound") && deviceOn) {
+        String label = doc["detected_sound"].as<String>();
+        if (label != "none" && label != "unknown") {
+          activeSoundType = label;
+          currentDisplayLabel = label;
+          updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+          displayResetTime = millis();
+          triggerVibration(vibrationPwmValue, 300);
+        }
+      }
+
+      if (doc.containsKey("sensitivity")) {
+        String sens = doc["sensitivity"].as<String>();
+        noiseFloor = (sens == "broad" || sens == "wide") ? 800 : 1500;
+      }
+
+      if (doc.containsKey("vibration")) {
+        String vib = doc["vibration"].as<String>();
+        if (vib == "low") vibrationPwmValue = 80;
+        else if (vib == "high") vibrationPwmValue = 255;
+        else vibrationPwmValue = 165;
+      }
+    }
+  }
+
+  if (isConnectedToApp && (millis() - lastHeartbeat > HEARTBEAT_TIMEOUT)) {
+    isConnectedToApp = false;
+    drawWaitingScreen("Waiting for App...");
+    Serial.println("[Network] Connection timed out. Reverting screen...");
+  }
+
+  // ================= SOUND & DIRECTION DETECTION =================
+  if (deviceOn) {
+    if (millis() - lastAlertTime < alertCooldown) {
+      return; 
+    }
+
+    size_t bytesRead = 0;
+    i2s_read(I2S_PORT, i2sBuffer, sizeof(i2sBuffer), &bytesRead, 10 / portTICK_PERIOD_MS);
+
+    int count = bytesRead / sizeof(int32_t);
+    int pairs = count / 2;
+    long leftSum = 0;
+    long rightSum = 0;
+
+    for (int i = 0; i < count - 1; i += 2) {
+      leftSum += abs(i2sBuffer[i] >> 14);
+      if (i + 1 < count) {
+        rightSum += abs(i2sBuffer[i + 1] >> 14);
+      }
+    }
+
+    long leftAvg = (pairs > 0) ? (leftSum / pairs) : 0;
+    long rightAvg = (pairs > 0) ? (rightSum / pairs) : 0;
+
+    if (leftAvg >= noiseFloor || rightAvg >= noiseFloor) {
+      String winningDirection; 
+      char newDirectionChar; 
+
+      // Directly compare Left vs Right (No Center Default)
+      if (leftAvg >= rightAvg) {
+        winningDirection = "left";
+        newDirectionChar = 'L';  
+      } else {
+        winningDirection = "right";
+        newDirectionChar = 'R';
+      }
+
+      currentDisplayLabel = activeSoundType;
+      currentDirectionChar = newDirectionChar;
+
+      updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+
+      displayResetTime = millis();
+      lastAlertTime = millis(); 
+
+      sendWifiAlert(winningDirection, max(leftAvg, rightAvg), i2sBuffer, count);
+      sendAlertToSupabase(winningDirection, max(leftAvg, rightAvg));
+      triggerVibration(vibrationPwmValue, 250);
+
+    } else {
+      if (currentDisplayLabel != "Ready to Detect" && (millis() - displayResetTime > alertCooldown)) {
+        currentDisplayLabel = "Ready to Detect";
+        currentDirectionChar = 'N'; 
+        activeSoundType = "Listening..."; 
+        updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+      }
+    }
+  }
+}
+
+// ================= I2S MIC SETUP =================
+void setupI2S() {
+  const i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = 16000,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = 0
+  };
+  const i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,   
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num = I2S_SD  
+  };
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_PORT, &pin_config);
+}
+
+// ================= NETWORK HELPERS =================
+void sendHandshakeResponse() {
+  if (WiFi.status() == WL_CONNECTED) {
+    IPAddress target = appIPKnown ? appIP : broadcastIP;
+    udp.beginPacket(target, udpPort);
+    String payload = "{\"type\":\"pong\",\"device\":\"sonoband\",\"status\":\"connected\",\"is_on\":" + 
+                     String(deviceOn ? "true" : "false") + 
+                     ",\"mac_address\":\"" + WiFi.macAddress() + 
+                     "\",\"ip_address\":\"" + WiFi.localIP().toString() + "\"}";
+    udp.print(payload);
+    udp.endPacket();
+  }
+}
+
+void sendWifiAlert(String direction, long amplitude, int32_t* rawBuffer, int bufferLength) {
+  if (WiFi.status() == WL_CONNECTED) {
+    IPAddress target = appIPKnown ? appIP : broadcastIP;
+    
+    #if ARDUINOJSON_VERSION_MAJOR >= 7
+      JsonDocument doc;
+      JsonArray samples = doc["audio_samples"].to<JsonArray>();
+    #else
+      StaticJsonDocument<1536> doc;
+      JsonArray samples = doc.createNestedArray("audio_samples");
+    #endif
+
+    doc["user_id"] = currentLoggedInUser;
+    doc["mac_address"] = WiFi.macAddress();
+    doc["ip_address"] = WiFi.localIP().toString();
+    doc["direction"] = direction;
+    doc["amplitude"] = amplitude;
+    doc["sample_rate"] = 16000;
+
+    int maxSamples = (bufferLength < 128) ? bufferLength : 128;
+    for (int i = 0; i < maxSamples; i++) {
+      samples.add((int16_t)(rawBuffer[i] >> 16));
+    }
+
+    udp.beginPacket(target, udpPort);
+    serializeJson(doc, udp);
+    udp.endPacket();
+  }
+}
+
+// ================= DIRECT SUPABASE HTTP INSERTION =================
+void sendAlertToSupabase(String direction, long amplitude) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(supabaseUrl);
+
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("apikey", supabaseKey);
+    http.addHeader("Authorization", String("Bearer ") + supabaseKey);
+    http.addHeader("Prefer", "return=minimal");
+
+    #if ARDUINOJSON_VERSION_MAJOR >= 7
+      JsonDocument doc;
+    #else
+      StaticJsonDocument<256> doc;
+    #endif
+
+    int parsedUserId = currentLoggedInUser.toInt();
+    doc["user_id"] = (parsedUserId > 0) ? parsedUserId : 21;
+
+    if (activeSoundType != "Listening..." && activeSoundType != "Ready to Detect") {
+      doc["sound_type"] = activeSoundType;
+    } else {
+      doc["sound_type"] = nullptr;
+    }
+
+    doc["status"] = "unread";
+    doc["metadata"] = direction;
+
+    if (amplitude > 40000) {
+      doc["alert_type"] = "high";
+    } else if (amplitude > 15000) {
+      doc["alert_type"] = "medium";
+    } else {
+      doc["alert_type"] = "low";
+    }
+
+    String jsonPayload;
+    serializeJson(doc, jsonPayload);
+
+    Serial.print("[Supabase] Outgoing Payload: ");
+    Serial.println(jsonPayload);
+
+    int httpResponseCode = http.POST(jsonPayload);
+
+    Serial.print("[Supabase] HTTP Post Response Code: ");
+    Serial.println(httpResponseCode);
+
+    if (httpResponseCode < 0) {
+      Serial.print("[Supabase] Post Error: ");
+      Serial.println(http.errorToString(httpResponseCode).c_str());
+    } else if (httpResponseCode >= 400) {
+      Serial.print("[Supabase] Server Error Body: ");
+      Serial.println(http.getString());
+    }
+
+    http.end();
+  }
+}
+
+// ================= HARDWARE MOTOR CONTROLS =================
+void triggerVibration(int pwm, unsigned long durationMs) {
+  analogWrite(VIB_MOTOR_PIN, pwm);
+  vibOffTime = millis() + durationMs;
+  isVibrating = true;
+}
+
+void updateVibration() {
+  if (isVibrating && millis() >= vibOffTime) {
+    analogWrite(VIB_MOTOR_PIN, 0);
+    isVibrating = false;
+  }
+}
+
+// ================= DISPLAY SCREENS =================
+void drawWelcomeScreen() {
+  tft.fillScreen(ST7735_BLACK);
+  tft.setTextColor(ST7735_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(35, 15);
+  tft.print("WELCOME");
+  tft.setCursor(32, 45);
+  tft.setTextColor(ST7735_WHITE);
+  tft.print("SonoBand");
+  
+  lastRenderedLabel = "";
+  lastRenderedDir = '\0';
+}
+
+void drawWaitingScreen(String msg) {
+  tft.fillScreen(ST7735_BLACK);
+  tft.setTextColor(ST7735_CYAN);
+  tft.setTextSize(1);
+  tft.setCursor(10, 20);
+  tft.print("SonoBand Status:");
+  tft.setCursor(10, 45);
+  tft.setTextColor(ST7735_WHITE);
+  tft.print(msg);
+  
+  lastRenderedLabel = "";
+  lastRenderedDir = '\0';
+}
+
+void drawConnectedScreen() {
+  tft.fillScreen(ST7735_BLACK);
+  tft.setTextColor(ST7735_GREEN);
+  tft.setTextSize(2);
+  tft.setCursor(15, 20);
+  tft.print("CONNECTED!");
+  tft.setTextColor(ST7735_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(20, 50);
+  tft.print("Device is paired");
+  
+  lastRenderedLabel = "";
+  lastRenderedDir = '\0';
+}
+
+void drawOffScreen() {
+  tft.fillScreen(ST7735_BLACK);
+  tft.setTextColor(ST7735_DARKRED);
+  tft.setTextSize(2);
+  tft.setCursor(28, 30);
+  tft.print("POWER OFF");
+  
+  lastRenderedLabel = "";
+  lastRenderedDir = '\0';
+}
+
+void updateFullDisplay(String label, char dir) {
+  if (label == lastRenderedLabel && dir == lastRenderedDir) {
+    return;
+  }
+  
+  lastRenderedLabel = label;
+  lastRenderedDir = dir;
+
+  uint16_t bgColor;
+  if (dir == 'L') bgColor = ST7735_RED;          
+  else if (dir == 'R') bgColor = ST7735_BLUE;     
+  else bgColor = tft.color565(40, 40, 50);       
+
+  tft.fillScreen(bgColor);
+
+  const unsigned char* selectedIcon = epd_bitmap_ic_wave; 
+  String lowerLabel = label;
+  lowerLabel.toLowerCase();
+
+  if (lowerLabel.indexOf("siren") >= 0 || lowerLabel.indexOf("alarm") >= 0) {
+    selectedIcon = epd_bitmap_ic_siren;
+  } else if (lowerLabel.indexOf("bark") >= 0 || lowerLabel.indexOf("dog") >= 0) {
+    selectedIcon = epd_bitmap_ic_barking;
+  } else if (lowerLabel.indexOf("bell") >= 0 || lowerLabel.indexOf("door") >= 0 || lowerLabel.indexOf("knock") >= 0) {
+    selectedIcon = epd_bitmap_ic_doorbell;
+  } else if (lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0) {
+    selectedIcon = epd_bitmap_ic_baby;
+  } else if (lowerLabel.indexOf("car") >= 0 || lowerLabel.indexOf("horn") >= 0 || lowerLabel.indexOf("traffic") >= 0) {
+    selectedIcon = epd_bitmap_ic_car;
+  } else if (lowerLabel.indexOf("speech") >= 0 || lowerLabel.indexOf("talk") >= 0 || lowerLabel.indexOf("voice") >= 0) {
+    selectedIcon = epd_bitmap_ic_speech;
+  } else if (lowerLabel.indexOf("alert") >= 0 || lowerLabel.indexOf("loud") >= 0) {
+    selectedIcon = epd_bitmap_ic_alert;
+  }
+
+  tft.drawBitmap(8, 40, selectedIcon, 32, 32, ST7735_WHITE);
+
+  tft.setTextColor(ST7735_WHITE);
+  if (label.length() <= 13) {
+    tft.setTextSize(2); 
+    int xPos = (160 - (label.length() * 12)) / 2;
+    tft.setCursor(xPos < 2 ? 2 : xPos, 8);
+  } else {
+    tft.setTextSize(1); 
+    int xPos = (160 - (label.length() * 6)) / 2;
+    tft.setCursor(xPos < 2 ? 2 : xPos, 12);
+  }
+  tft.print(label);
+
+  tft.setTextSize(2); 
+  if (dir == 'L') {
+    tft.setCursor(48, 48);
+    tft.print("<- LEFT");
+  } else if (dir == 'R') {
+    tft.setCursor(44, 48);
+    tft.print("RIGHT ->");
+  } else {
+    tft.setTextSize(1);
+    tft.setCursor(40, 52);
+    tft.print("[ Ready to Detect ]");
+  }
+}

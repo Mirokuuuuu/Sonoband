@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -6,11 +6,10 @@ import {
   FlatList,
   TouchableOpacity,
   ActivityIndicator,
-  SafeAreaView,
   StatusBar,
-  Platform,
   Alert
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { supabase } from '../services/supabaseClient';
 
@@ -18,31 +17,146 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (userId) {
-      fetchCaregiverNotifications();
+  // Helper to standardise and parse timestamp dates
+  const parseTimestamp = (dateString) => {
+    if (!dateString) return null;
+    let formattedStr = typeof dateString === 'string' ? dateString.trim().replace(' ', 'T') : dateString;
+    if (typeof formattedStr === 'string' && !formattedStr.endsWith('Z') && !formattedStr.includes('+')) {
+      formattedStr += 'Z';
     }
-  }, [userId]);
+    const parsedDate = new Date(formattedStr);
+    return isNaN(parsedDate.getTime()) ? null : parsedDate;
+  };
 
-  const fetchCaregiverNotifications = async () => {
+  const formatLocalDateTime = (dateString) => {
+    const localDate = parseTimestamp(dateString);
+    if (!localDate) return 'Recently';
+
+    const dateStr = localDate.toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+    const timeStr = localDate.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+
+    return `${dateStr} • ${timeStr}`;
+  };
+
+  const getActiveCaregiverId = async () => {
+    if (userId && !isNaN(Number(userId))) return Number(userId);
+
+    const { data: userData } = await supabase.auth.getUser();
+    if (userData?.user?.email) {
+      const { data: customUser } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', userData.user.email)
+        .maybeSingle();
+
+      if (customUser?.id) return customUser.id;
+    }
+    return userData?.user?.id || null;
+  };
+
+  const fetchCaregiverNotifications = useCallback(async () => {
     setLoading(true);
     try {
-      // Fetch notifications filtered for the caregiver
-      const { data, error } = await supabase
-        .from('notifications')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false });
+      const caregiverId = await getActiveCaregiverId();
+      if (!caregiverId) return;
 
-      if (error) throw error;
-      setNotifications(data || []);
+      // 1. Get linked patients assigned to this caregiver
+      const { data: links } = await supabase
+        .from('caregiver_links')
+        .select('patient_id')
+        .eq('caregiver_id', caregiverId);
+
+      const patientIds = (links || []).map((link) => link.patient_id);
+      const targetUserIds = [caregiverId, ...patientIds];
+
+      // 2. Fetch Notifications AND Audit Logs
+      const [notifRes, auditRes] = await Promise.all([
+        supabase
+          .from('notifications')
+          .select('*')
+          .in('user_id', targetUserIds)
+          .in('notification_type', ['group_created', 'location_update', 'geofence_alert'])
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('audit_logs')
+          .select('*')
+          .in('user_id', targetUserIds)
+          .in('action', ['login', 'logout'])
+          .order('created_at', { ascending: false })
+      ]);
+
+      if (notifRes.error) throw notifRes.error;
+      if (auditRes.error) throw auditRes.error;
+
+      const rawNotifs = notifRes.data || [];
+
+      // 3. Format notifications (Group & Location Events)
+      const formattedNotifs = rawNotifs.map((item) => ({
+        id: `notif_${item.id}`,
+        type: item.notification_type,
+        title: item.title,
+        message: item.message,
+        metadata: item.metadata,
+        created_at: item.created_at,
+      }));
+
+      // 4. Format audit logs (Login & Logout Events mapped, but filtered out below)
+      const formattedAudits = (auditRes.data || []).map((item) => ({
+        id: `audit_${item.id}`,
+        type: item.action, // 'login' or 'logout'
+        title: `${item.user_name || 'User'} (${item.action.toUpperCase()})`,
+        message: item.details || `${item.user_name || 'User'} performed ${item.action}.`,
+        metadata: null,
+        created_at: item.created_at,
+      }));
+
+      // 5. Combine and filter out login/logout events from being displayed
+      const combined = [...formattedNotifs, ...formattedAudits]
+        .filter((item) => item.type !== 'login' && item.type !== 'logout')
+        .sort((a, b) => {
+          const dateA = parseTimestamp(a.created_at) || new Date(0);
+          const dateB = parseTimestamp(b.created_at) || new Date(0);
+          return dateB - dateA;
+        });
+
+      setNotifications(combined);
     } catch (err) {
-      console.error("Error fetching notifications:", err.message);
-      Alert.alert("Error", "Failed to load notifications.");
+      console.error("Error fetching activity logs:", err.message);
+      Alert.alert("Error", "Failed to load activity logs.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [userId]);
+
+  useEffect(() => {
+    fetchCaregiverNotifications();
+
+    const channel = supabase
+      .channel('caregiver_activity_stream')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications' },
+        () => fetchCaregiverNotifications()
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'audit_logs' },
+        () => fetchCaregiverNotifications()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchCaregiverNotifications]);
 
   const handleGoBack = () => {
     if (typeof onNavigate === 'function') {
@@ -52,25 +166,20 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
     }
   };
 
-  // Icon and color mapper based on notification_type
   const getNotificationBadge = (type) => {
-    switch (type?.toLowerCase()) {
-      case 'emergency':
-        return { icon: 'alert-triangle', color: '#EF4444', bg: '#EF444420' }; // Red for SOS / Vitals
-      case 'device':
-        return { icon: 'cpu', color: '#F59E0B', bg: '#F59E0B20' }; // Amber for Device status
-      case 'group':
-        return { icon: 'users', color: '#38BDF8', bg: '#38BDF820' }; // Blue for Group changes
-      default:
-        return { icon: 'bell', color: '#10B981', bg: '#10B98120' }; // Green for System / Logins
+    const key = type?.toLowerCase() || '';
+
+    if (key === 'group_created') return { icon: 'users', color: '#38BDF8', bg: '#38BDF820' };
+    if (key === 'location_update' || key === 'geofence_alert') {
+      return { icon: 'map-pin', color: '#F59E0B', bg: '#F59E0B20' };
     }
+
+    return { icon: 'bell', color: '#38BDF8', bg: '#38BDF820' };
   };
 
   const renderItem = ({ item }) => {
-    const badge = getNotificationBadge(item.notification_type);
-    const formattedTime = item.created_at 
-      ? new Date(item.created_at).toLocaleString() 
-      : 'Recently';
+    const badge = getNotificationBadge(item.type);
+    const formattedTime = formatLocalDateTime(item.created_at);
 
     return (
       <View style={styles.card}>
@@ -84,24 +193,23 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
             <Text style={styles.time}>{formattedTime}</Text>
           </View>
           <Text style={styles.message}>{item.message}</Text>
-          {item.metadata ? (
-            <Text style={styles.metadata}>Ref: {item.metadata}</Text>
-          ) : null}
+          {item.metadata && (
+            <Text style={styles.metadata}>Location Details: {item.metadata}</Text>
+          )}
         </View>
       </View>
     );
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
-      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={handleGoBack} style={styles.backButton}>
           <Text style={styles.backButtonText}>Back</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Caregiver Alerts</Text>
+        <Text style={styles.headerTitle}>Activity & Location Logs</Text>
         <TouchableOpacity onPress={fetchCaregiverNotifications} style={styles.refreshButton}>
           <Feather name="refresh-cw" size={18} color="#38BDF8" />
         </TouchableOpacity>
@@ -113,13 +221,13 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
         ) : (
           <FlatList
             data={notifications}
-            keyExtractor={(item) => item.id.toString()}
+            keyExtractor={(item) => item.id}
             renderItem={renderItem}
             contentContainerStyle={{ paddingBottom: 20 }}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Feather name="bell-off" size={40} color="#64748B" />
-                <Text style={styles.emptyText}>No alerts or updates found.</Text>
+                <Text style={styles.emptyText}>No activity logs or notifications found.</Text>
               </View>
             }
           />
@@ -130,7 +238,7 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0F172A', paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 0 },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
   backButton: { padding: 4 },
   backButtonText: { color: '#38BDF8', fontSize: 16, fontWeight: 'bold' },
@@ -144,7 +252,7 @@ const styles = StyleSheet.create({
   title: { color: '#F8FAFC', fontSize: 15, fontWeight: 'bold', flex: 1, marginRight: 8 },
   time: { color: '#64748B', fontSize: 11 },
   message: { color: '#94A3B8', fontSize: 13, lineHeight: 18 },
-  metadata: { color: '#38BDF8', fontSize: 11, marginTop: 4, fontStyle: 'italic' },
+  metadata: { color: '#38BDF8', fontSize: 11, marginTop: 6, fontWeight: '600' },
   emptyContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 60, gap: 12 },
   emptyText: { color: '#64748B', fontSize: 14 }
 });

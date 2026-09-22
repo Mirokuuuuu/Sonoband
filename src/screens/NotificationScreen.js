@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,7 +7,6 @@ import {
   StyleSheet,
   ActivityIndicator,
   RefreshControl,
-  Alert,
   ScrollView,
 } from 'react-native';
 import { Ionicons, Feather } from '@expo/vector-icons';
@@ -31,7 +30,6 @@ const MONTHS = [
 
 const FRIENDLY_TYPES = [
   { label: 'All Alerts', value: 'ALL', icon: 'bell' },
-  { label: 'Account & Security', value: 'auth_event', icon: 'shield' },
   { label: 'Device & Connections', value: 'device_event', icon: 'cpu' },
 ];
 
@@ -39,16 +37,113 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState(userId || null);
 
-  // Default filters set to 'ALL' to ensure historical notifications load
   const today = new Date();
   const [selectedMonth, setSelectedMonth] = useState('ALL');
   const [selectedDay, setSelectedDay] = useState('ALL');
   const [selectedType, setSelectedType] = useState('ALL');
 
+  // Helper to standardise and parse timestamp dates
+  const parseTimestamp = (dateString) => {
+    if (!dateString) return null;
+    let formattedStr = typeof dateString === 'string' ? dateString.trim().replace(' ', 'T') : dateString;
+    if (typeof formattedStr === 'string' && !formattedStr.endsWith('Z') && !formattedStr.includes('+')) {
+      formattedStr += 'Z';
+    }
+    const parsedDate = new Date(formattedStr);
+    return isNaN(parsedDate.getTime()) ? null : parsedDate;
+  };
+
+  const fetchNotifications = useCallback(async () => {
+    try {
+      setLoading(true);
+
+      let activeNumericUserId = userId;
+
+      if (!activeNumericUserId) {
+        const { data: userData } = await supabase.auth.getUser();
+        if (userData?.user?.email) {
+          const { data: customUser } = await supabase
+            .from('users')
+            .select('id')
+            .eq('email', userData.user.email)
+            .maybeSingle();
+
+          if (customUser?.id) {
+            activeNumericUserId = Number(customUser.id);
+          }
+        }
+      }
+
+      setCurrentUserId(activeNumericUserId);
+
+      let notifQuery = supabase
+        .from('notifications')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (activeNumericUserId !== undefined && activeNumericUserId !== null) {
+        const parsedId = Number(activeNumericUserId);
+        if (!isNaN(parsedId)) {
+          notifQuery = notifQuery.eq('user_id', parsedId);
+        }
+      }
+
+      const { data: notifData, error } = await notifQuery;
+
+      if (error) {
+        console.error('Supabase Notifications Error:', error.message);
+      }
+
+      const rawItems = notifData || [];
+
+      const operationalEvents = rawItems.map((item) => ({
+        id: item.id,
+        rawTitle: item.title,
+        rawDetails: item.message || item.metadata || '',
+        type: 'device_event',
+        notification_type: item.notification_type,
+        metadata: item.metadata,
+        created_at: item.created_at,
+      }));
+
+      setNotifications(operationalEvents);
+    } catch (err) {
+      console.error('Error fetching notifications:', err);
+      setNotifications([]);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [userId]);
+
   useEffect(() => {
     fetchNotifications();
-  }, [userId]);
+
+    if (!userId) return;
+    const parsedId = Number(userId);
+
+    const channel = supabase
+      .channel(`user_notifications_${parsedId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${parsedId}`,
+        },
+        () => {
+          fetchNotifications();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId, fetchNotifications]);
 
   const daysInMonth = useMemo(() => {
     if (selectedMonth === 'ALL') return 31;
@@ -72,28 +167,50 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   };
 
   const formatLocalDateTime = (dateString) => {
-    if (!dateString || typeof dateString !== 'string') {
+    const localDate = parseTimestamp(dateString);
+    if (!localDate) {
       return { dateStr: 'N/A', timeStr: '' };
     }
-    let formattedStr = dateString.replace(' ', 'T');
-    if (!formattedStr.endsWith('Z') && !formattedStr.includes('+')) {
-      formattedStr += 'Z';
-    }
-    const localDate = new Date(formattedStr);
+
     return {
-      dateStr: localDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
-      timeStr: localDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }),
+      dateStr: localDate.toLocaleDateString([], {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      }),
+      timeStr: localDate.toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      }),
     };
   };
 
   const formatUserFriendlyMessage = (title, message, metadata) => {
     const text = `${title || ''} ${message || ''} ${metadata || ''}`.toLowerCase();
 
-    if (text.includes('login')) {
-      return { title: 'Login', desc: 'You logged into your account.' };
+    if (text.includes('registered') || text.includes('added')) {
+      return { title: title || 'Device Registered', desc: message || 'A new device was added.' };
     }
-    if (text.includes('logout')) {
-      return { title: 'Logout', desc: 'You logged out of your session.' };
+    if (
+      text.includes('turned on') || 
+      text.includes('powered on') || 
+      text.includes('power_on') || 
+      text.includes('is_on: true') ||
+      text.includes('powered_on') ||
+      metadata === 'ON'
+    ) {
+      return { title: 'Device Turned On', desc: message || 'Your device was powered on.' };
+    }
+    if (
+      text.includes('turned off') || 
+      text.includes('powered off') || 
+      text.includes('power_off') || 
+      text.includes('is_on: false') ||
+      text.includes('powered_off') ||
+      metadata === 'OFF'
+    ) {
+      return { title: 'Device Turned Off', desc: message || 'Your device was powered off.' };
     }
     if (text.includes('connected') && !text.includes('disconnected')) {
       return { title: 'Device Connected', desc: message || 'Your device is connected.' };
@@ -114,6 +231,26 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   const getEventIcon = (title, message, type, metadata) => {
     const text = `${title || ''} ${message || ''} ${type || ''} ${metadata || ''}`.toLowerCase();
 
+    if (
+      text.includes('turned on') || 
+      text.includes('powered on') || 
+      text.includes('power_on') || 
+      text.includes('is_on: true') ||
+      text.includes('powered_on') ||
+      metadata === 'ON'
+    ) {
+      return { icon: 'toggle-right', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.1)' };
+    }
+    if (
+      text.includes('turned off') || 
+      text.includes('powered off') || 
+      text.includes('power_off') || 
+      text.includes('is_on: false') ||
+      text.includes('powered_off') ||
+      metadata === 'OFF'
+    ) {
+      return { icon: 'toggle-left', color: '#64748B', bg: 'rgba(100, 116, 139, 0.1)' };
+    }
     if (text.includes('connected') && !text.includes('disconnected')) {
       return { icon: 'bluetooth', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.1)' };
     }
@@ -132,116 +269,21 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
     if (text.includes('family') || text.includes('invite') || text.includes('group')) {
       return { icon: 'users', color: '#A855F7', bg: 'rgba(168, 85, 247, 0.1)' };
     }
-    if (text.includes('logout')) {
-      return { icon: 'power', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.1)' };
-    }
-    if (text.includes('login')) {
-      return { icon: 'log-in', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.1)' };
-    }
 
     return { icon: 'bell', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.1)' };
   };
 
-  const fetchNotifications = async () => {
-    try {
-      setLoading(true);
-
-      let activeNumericUserId = userId;
-
-      // Resolved fallback: Convert auth session email to integer user_id from users table
-      if (!activeNumericUserId) {
-        const { data: userData } = await supabase.auth.getUser();
-        if (userData?.user?.email) {
-          const { data: customUser } = await supabase
-            .from('users')
-            .select('id')
-            .eq('email', userData.user.email)
-            .maybeSingle();
-
-          if (customUser?.id) {
-            activeNumericUserId = Number(customUser.id);
-          }
-        }
-      }
-
-      let notifQuery = supabase
-        .from('notifications')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      let auditQuery = supabase
-        .from('audit_logs')
-        .select('*')
-        .in('action', ['login', 'logout', 'Login', 'Logout'])
-        .order('created_at', { ascending: false });
-
-      // Apply integer filter strictly if parsed as valid number
-      if (activeNumericUserId !== undefined && activeNumericUserId !== null) {
-        const parsedId = Number(activeNumericUserId);
-        if (!isNaN(parsedId)) {
-          notifQuery = notifQuery.eq('user_id', parsedId);
-          auditQuery = auditQuery.eq('user_id', parsedId);
-        }
-      }
-
-      const [notifRes, auditRes] = await Promise.all([notifQuery, auditQuery]);
-
-      if (notifRes.error) {
-        console.error('Supabase Notifications Error:', notifRes.error.message);
-      }
-      if (auditRes.error) {
-        console.error('Supabase Audit Logs Error:', auditRes.error.message);
-      }
-
-      const operationalEvents = (notifRes.data || []).map((item) => ({
-        id: `notif_${item.id}`,
-        rawTitle: item.title,
-        rawDetails: item.message || item.metadata || '',
-        type: 'device_event',
-        notification_type: item.notification_type,
-        metadata: item.metadata,
-        created_at: item.created_at,
-      }));
-
-      const authEvents = (auditRes.data || []).map((item) => ({
-        id: `audit_${item.id}`,
-        rawTitle: item.action ? `${item.action.toUpperCase()}` : 'Auth',
-        rawDetails: item.details || `Action: ${item.action}`,
-        type: 'auth_event',
-        metadata: item.action,
-        created_at: item.created_at,
-      }));
-
-      const mergedFeed = [...operationalEvents, ...authEvents].sort(
-        (a, b) => new Date(b.created_at) - new Date(a.created_at)
-      );
-
-      setNotifications(mergedFeed);
-    } catch (err) {
-      console.error('Error fetching notifications:', err);
-      setNotifications([]);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-
   const filteredNotifications = useMemo(() => {
     return notifications.filter((item) => {
-      if (!item.created_at) return true;
+      const itemDate = parseTimestamp(item.created_at);
+      if (!itemDate) return true;
 
-      const itemDate = new Date(item.created_at);
       const itemMonth = itemDate.getMonth();
       const itemDay = itemDate.getDate();
 
-      // Month & Day filter logic
       if (selectedMonth !== 'ALL' && itemMonth !== selectedMonth) return false;
       if (selectedDay !== 'ALL' && itemDay !== selectedDay) return false;
 
-      // Category filter logic
-      if (selectedType === 'auth_event' && item.type !== 'auth_event') {
-        return false;
-      }
       if (selectedType === 'device_event' && item.type !== 'device_event') {
         return false;
       }
@@ -249,17 +291,6 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
       return true;
     });
   }, [notifications, selectedMonth, selectedDay, selectedType]);
-
-  const handleClearAll = () => {
-    Alert.alert(
-      'Clear View',
-      'Are you sure you want to clear these notifications from your screen?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Clear All', style: 'destructive', onPress: () => setNotifications([]) },
-      ]
-    );
-  };
 
   const handleBackNavigation = () => {
     if (navigation?.goBack) {
@@ -280,16 +311,10 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
           <Text style={styles.headerTitle}>Notifications</Text>
           <Text style={styles.headerSub}>Activity & Activity History</Text>
         </View>
-        {notifications.length > 0 && (
-          <TouchableOpacity onPress={handleClearAll}>
-            <Text style={styles.clearText}>Clear All</Text>
-          </TouchableOpacity>
-        )}
       </View>
 
       {/* Filter Section */}
       <View style={styles.filterBar}>
-        {/* Category Filters */}
         <Text style={styles.filterLabel}>Show Activity Type</Text>
         <ScrollView 
           horizontal 
@@ -319,7 +344,6 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
           })}
         </ScrollView>
 
-        {/* Month Selector */}
         <Text style={styles.filterLabel}>Month</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalScroll}>
           {MONTHS.map((m) => {
@@ -344,7 +368,6 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
           })}
         </ScrollView>
 
-        {/* Day Selector */}
         <Text style={styles.filterLabel}>Day</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalScroll}>
           <TouchableOpacity
@@ -443,7 +466,6 @@ const styles = StyleSheet.create({
   iconButton: { padding: 8, borderRadius: 10, backgroundColor: '#334155' },
   headerTitle: { fontSize: 20, fontWeight: '700', color: '#F8FAFC' },
   headerSub: { fontSize: 12, color: '#94A3B8' },
-  clearText: { color: '#EF4444', fontSize: 13, fontWeight: '600' },
   
   filterBar: {
     backgroundColor: '#1E293B',
@@ -471,7 +493,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#0F172A',
     alignItems: 'center',
-    justify: 'center',
+    justifyContent: 'center',
     borderWidth: 1,
     borderColor: '#334155',
   },

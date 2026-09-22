@@ -5,12 +5,12 @@ import {
   View,
   TouchableOpacity,
   ScrollView,
-  SafeAreaView,
   Alert,
   ActivityIndicator,
   StatusBar,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { Ionicons, Feather } from '@expo/vector-icons';
 import { supabase, logSystemActivity } from '../services/supabaseClient';

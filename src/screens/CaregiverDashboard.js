@@ -5,26 +5,25 @@ import {
   View,
   TouchableOpacity,
   ScrollView,
-  SafeAreaView,
   StatusBar,
-  Platform,
   Alert,
   ActivityIndicator,
   RefreshControl,
+  Platform,
 } from 'react-native';
-import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
 import { supabase } from '../services/supabaseClient';
 
-export default function CaregiverDashboard({ navigation, onNavigate, userId, route }) {
+export default function CaregiverDashboard({ navigation, onNavigate, userId, route, onLogout }) {
   const activeUserId = userId || route?.params?.userId;
-  
+
   const [patientCount, setPatientCount] = useState(0);
   const [activeAlertCount, setActiveAlertCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const navigateTo = (screen, params = {}) => {
-    // Standardize passing activeUserId if navigating to profile
     const enrichedParams = screen === 'profile' ? { userId: activeUserId, ...params } : params;
     if (onNavigate) {
       onNavigate(screen, enrichedParams);
@@ -36,30 +35,32 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
   // Fetch Dashboard Metrics
   const fetchDashboardMetrics = useCallback(async () => {
     try {
-      // 1. Resolve Auth User ID if not provided as prop
-      let currentUserId = activeUserId;
-      if (!currentUserId) {
-        const { data: { user } } = await supabase.auth.getUser();
-        currentUserId = user?.id;
-      }
+      if (!activeUserId) return;
 
-      if (!currentUserId) return;
-
-      // 2. Fetch Assigned Patients Count for this specific caregiver
+      // 1. Fetch Assigned Patients Count
       const { count: patients, error: patientError } = await supabase
         .from('caregiver_links')
         .select('id', { count: 'exact', head: true })
-        .eq('caregiver_id', currentUserId);
+        .eq('caregiver_id', activeUserId);
 
       if (!patientError && patients !== null) {
         setPatientCount(patients);
       }
 
-      // 3. Fetch Active Unread Notifications/Alerts for this caregiver
+      // 2. Fetch linked patient IDs
+      const { data: links } = await supabase
+        .from('caregiver_links')
+        .select('patient_id')
+        .eq('caregiver_id', activeUserId);
+
+      const patientIds = (links || []).map((link) => link.patient_id);
+      const targetUserIds = [activeUserId, ...patientIds];
+
+      // 3. Fetch Active Unread Notifications/Alerts
       const { count: alerts, error: alertError } = await supabase
         .from('notifications')
         .select('id', { count: 'exact', head: true })
-        .eq('user_id', currentUserId)
+        .in('user_id', targetUserIds)
         .eq('is_read', false);
 
       if (!alertError && alerts !== null) {
@@ -76,7 +77,6 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
   useEffect(() => {
     fetchDashboardMetrics();
 
-    // Set up Realtime listener for incoming notifications
     const channel = supabase
       .channel('caregiver_dashboard_updates')
       .on(
@@ -96,27 +96,65 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
     fetchDashboardMetrics();
   };
 
-  const handleLogout = async () => {
-    Alert.alert('Sign Out', 'Are you sure you want to log out?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Logout',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await supabase.auth.signOut();
-          } catch (e) {
-            console.log('Error logging out:', e.message);
-          } finally {
-            navigateTo('login');
-          }
-        },
-      },
-    ]);
+  // Mirrored exact execution logic from SettingsScreen.js
+  const executeLogout = async () => {
+    try {
+      if (activeUserId && supabase) {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('email, name, role')
+          .eq('id', activeUserId)
+          .maybeSingle();
+
+        try {
+          const { error: insertErr } = await supabase
+            .from('audit_logs')
+            .insert([
+              {
+                user_id: activeUserId,
+                user_name: userData?.name || userData?.email || 'Caregiver',
+                user_email: userData?.email || '',
+                role: userData?.role || 'caregiver',
+                action: 'Logout',
+                details: 'Caregiver logged out of application',
+                ip_address: Platform.OS === 'ios' ? 'iOS Device' : 'Mobile Client',
+                created_at: new Date().toISOString(),
+              },
+            ]);
+
+          if (insertErr) console.log('Audit log insert note:', insertErr.message);
+        } catch (insertErr) {
+          console.log('Audit log write skipped:', insertErr.message);
+        }
+      }
+    } catch (err) {
+      console.error('Logout logging error:', err);
+    } finally {
+      if (onLogout) {
+        await onLogout();
+      } else if (onNavigate) {
+        onNavigate('login');
+      } else if (navigation?.replace) {
+        navigation.replace('Login');
+      } else {
+        await supabase.auth.signOut();
+      }
+    }
+  };
+
+  const handleSystemLogout = () => {
+    Alert.alert(
+      'Logout Confirmation',
+      'Are you sure you want to log out of Sonoband?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Logout', style: 'destructive', onPress: executeLogout },
+      ]
+    );
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
       {/* Top Header */}
@@ -135,8 +173,8 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.iconButton, { backgroundColor: '#451A03', marginLeft: 8 }]}
-            onPress={handleLogout}
+            style={[styles.iconButton, styles.logoutButton]}
+            onPress={handleSystemLogout}
           >
             <Feather name="log-out" size={20} color="#EF4444" />
           </TouchableOpacity>
@@ -156,7 +194,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
             style={styles.statCard}
             onPress={() => navigateTo('assignedPatients')}
           >
-            <Ionicons name="people-outline" size={24} color="#06B6D4" />
+            <Feather name="users" size={24} color="#06B6D4" />
             {loading ? (
               <ActivityIndicator color="#06B6D4" style={{ marginVertical: 6 }} />
             ) : (
@@ -189,7 +227,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
           onPress={() => navigateTo('assignedPatients')}
         >
           <View style={styles.actionIconBg}>
-            <Ionicons name="medical-outline" size={22} color="#06B6D4" />
+            <Feather name="user-check" size={20} color="#06B6D4" />
           </View>
           <View style={styles.actionTextContainer}>
             <Text style={styles.actionTitle}>Assigned Patients</Text>
@@ -203,7 +241,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
           onPress={() => navigateTo('groupManagement')}
         >
           <View style={styles.actionIconBg}>
-            <Feather name="users" size={22} color="#38BDF8" />
+            <Feather name="users" size={20} color="#38BDF8" />
           </View>
           <View style={styles.actionTextContainer}>
             <Text style={styles.actionTitle}>Family Group Settings</Text>
@@ -217,7 +255,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
           onPress={() => navigateTo('caregiverNotifications')}
         >
           <View style={styles.actionIconBg}>
-            <Feather name="bell" size={22} color="#F59E0B" />
+            <Feather name="bell" size={20} color="#F59E0B" />
           </View>
           <View style={styles.actionTextContainer}>
             <Text style={styles.actionTitle}>Caregiver Notifications</Text>
@@ -229,7 +267,6 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
 
       {/* Centered Bottom Navigation Bar */}
       <View style={styles.bottomNav}>
-        {/* Tab 1: Home */}
         <TouchableOpacity
           style={styles.navItem}
           onPress={() => navigateTo('caregiverDashboard')}
@@ -238,25 +275,22 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
           <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
 
-        {/* Tab 2: Patients */}
         <TouchableOpacity
           style={styles.navItem}
           onPress={() => navigateTo('assignedPatients')}
         >
-          <Ionicons name="people-outline" size={22} color="#94A3B8" />
+          <Feather name="users" size={22} color="#94A3B8" />
           <Text style={styles.navText}>Patients</Text>
         </TouchableOpacity>
 
-        {/* Tab 3: Groups */}
         <TouchableOpacity
           style={styles.navItem}
           onPress={() => navigateTo('groupManagement')}
         >
-          <MaterialCommunityIcons name="account-group-outline" size={22} color="#94A3B8" />
+          <Feather name="grid" size={22} color="#94A3B8" />
           <Text style={styles.navText}>Groups</Text>
         </TouchableOpacity>
 
-        {/* Tab 4: Profile */}
         <TouchableOpacity
           style={styles.navItem}
           onPress={() => navigateTo('profile', { userRole: 'caregiver' })}
@@ -273,7 +307,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0F172A',
-    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0,
   },
   header: {
     flexDirection: 'row',
@@ -290,6 +323,7 @@ const styles = StyleSheet.create({
   headerSub: { fontSize: 12, color: '#94A3B8', marginTop: 2 },
   headerRightActions: { flexDirection: 'row', alignItems: 'center' },
   iconButton: { padding: 8, borderRadius: 10, backgroundColor: '#334155' },
+  logoutButton: { backgroundColor: '#EF444415', marginLeft: 8, borderWidth: 1, borderColor: '#EF444430' },
   scrollContent: { padding: 16, paddingBottom: 90 },
   statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, gap: 12 },
   statCard: {
@@ -344,7 +378,7 @@ const styles = StyleSheet.create({
   navItem: {
     flex: 1,
     alignItems: 'center',
-    justifyContent: 'center',
+    justify: 'center',
     paddingVertical: 6,
   },
   navText: {

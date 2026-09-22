@@ -43,13 +43,11 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedPassword = password.trim();
 
-    // 1. Required fields check
     if (!trimmedEmail || !trimmedPassword) {
       Alert.alert('Required Fields', 'Please fill in both gmail and password.');
       return;
     }
 
-    // 2. Strict Gmail domain validation
     if (!trimmedEmail.endsWith('@gmail.com')) {
       Alert.alert('Invalid Account', 'Only Gmail addresses (@gmail.com) are supported.');
       return;
@@ -58,7 +56,6 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
     setLoading(true);
 
     try {
-      // 3. Establish Supabase Auth session
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email: trimmedEmail,
         password: trimmedPassword,
@@ -66,7 +63,6 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
 
       const authUuid = authData?.user?.id;
 
-      // 4. Query user record from public.users matching email OR linked uuid
       let userData = null;
       
       const { data: userByEmail } = await supabase
@@ -86,7 +82,6 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
         userData = userByUuid;
       }
 
-      // Safe password comparison check
       let isPasswordMatch = false;
       if (userData?.password) {
         try {
@@ -102,15 +97,13 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
         return;
       }
 
-      // 5. Resolve Integer Primary Key and Role
-      const resolvedUserId = userData?.id ? Number(userData.id) : null;
+      const resolvedUserId = userData?.id ? userData.id : authUuid;
       const activeRole = String(
         userData?.role || 
         authData?.user?.user_metadata?.role || 
         'user'
       ).toLowerCase().trim();
 
-      // 6. Resolve Display Name from public.users or Metadata
       const rawName = 
         userData?.name ||
         userData?.full_name ||
@@ -124,12 +117,10 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
 
       const finalEmail = trimmedEmail || authData?.user?.email;
 
-      // 7. Save local session data
       if (resolvedUserId) await AsyncStorage.setItem('user_id', String(resolvedUserId));
       await AsyncStorage.setItem('user_role', activeRole);
       await AsyncStorage.setItem('user_name', resolvedName);
 
-      // 8. Log System Activity (Single audit log entry)
       try {
         await logSystemActivity(
           resolvedUserId,
@@ -146,9 +137,8 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
         console.log('Audit log skipped:', auditErr.message);
       }
 
-      // 9. Track device connection using Auth UUID
       try {
-        const connectionUserId = authUuid || userData?.uuid;
+        const connectionUserId = authUuid || userData?.uuid || resolvedUserId;
 
         if (connectionUserId) {
           await supabase
@@ -167,7 +157,6 @@ export default function LoginScreen({ navigation, onNavigate, onLoginSuccess }) 
 
       setLoading(false);
 
-      // 10. Delegate routing exclusively to onLoginSuccess
       if (onLoginSuccess) {
         onLoginSuccess(resolvedUserId, activeRole);
       } else {

@@ -9,10 +9,9 @@ import {
   Modal, 
   TextInput, 
   ActivityIndicator,
-  SafeAreaView,
-  StatusBar,
-  Platform
+  StatusBar
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { supabase, logSystemActivity } from '../services/supabaseClient';
 
@@ -308,7 +307,7 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
   );
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
       
       {/* Header */}
@@ -450,7 +449,7 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0F172A', paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 0 },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
   backButton: { padding: 4 },
   backButtonText: { color: '#38BDF8', fontSize: 16, fontWeight: 'bold' },

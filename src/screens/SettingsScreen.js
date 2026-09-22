@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   ScrollView,
-  Switch,
   Alert,
   StyleSheet,
   StatusBar,
@@ -15,10 +14,6 @@ import { Ionicons, Feather } from '@expo/vector-icons';
 import { supabase } from '../services/supabaseClient';
 
 export default function SettingsScreen({ navigation, onNavigate, userId, onLogout }) {
-  const [pushNotifications, setPushNotifications] = useState(true);
-  const [vibrationAlerts, setVibrationAlerts] = useState(true);
-  const [darkMode, setDarkMode] = useState(true);
-  const [autoSync, setAutoSync] = useState(true);
 
   const executeLogout = async () => {
     try {
@@ -81,6 +76,23 @@ export default function SettingsScreen({ navigation, onNavigate, userId, onLogou
     }
   };
 
+  // Navigates directly to the Forgot Password screen
+  const handleNavigateToForgotPassword = () => {
+    if (onNavigate) {
+      onNavigate('forgotPassword');
+    } else if (navigation?.navigate) {
+      navigation.navigate('ForgotPassword');
+    }
+  };
+
+  const handleNavigateToDeviceSettings = () => {
+    if (onNavigate) {
+      onNavigate('deviceControl');
+    } else if (navigation?.navigate) {
+      navigation.navigate('DeviceControl');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#1E293B" />
@@ -90,77 +102,49 @@ export default function SettingsScreen({ navigation, onNavigate, userId, onLogou
         <TouchableOpacity style={styles.iconButton} onPress={handleBackNavigation}>
           <Ionicons name="arrow-back" size={24} color="#F8FAFC" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Application Settings</Text>
+        <Text style={styles.headerTitle}>Account Settings</Text>
         <View style={{ width: 40 }} />
       </View>
 
       {/* Screen Body */}
       <View style={styles.body}>
         <ScrollView style={styles.scrollContainer} contentContainerStyle={styles.scrollContent}>
-          {/* Notifications Section */}
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Notifications & Alerts</Text>
-
-            <View style={styles.settingRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.settingLabel}>Push Notifications</Text>
-                <Text style={styles.settingSub}>Receive real-time alerts for sound events</Text>
+            {/* Change Password (Navigates to Forgot Password) */}
+            <TouchableOpacity 
+              style={styles.settingRow} 
+              onPress={handleNavigateToForgotPassword}
+              activeOpacity={0.7}
+            >
+              <View style={styles.settingIconContainer}>
+                <Feather name="lock" size={18} color="#06B6D4" />
               </View>
-              <Switch
-                value={pushNotifications}
-                onValueChange={setPushNotifications}
-                trackColor={{ false: '#334155', true: '#06B6D4' }}
-                thumbColor={pushNotifications ? '#F8FAFC' : '#94A3B8'}
-              />
-            </View>
-
-            <View style={[styles.settingRow, { borderBottomWidth: 0 }]}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.settingLabel}>Wrist Vibration Alerts</Text>
-                <Text style={styles.settingSub}>Trigger Sonoband hardware vibration</Text>
+                <Text style={styles.settingLabel}>Change Password</Text>
+                <Text style={styles.settingSub}>Reset or update your account password</Text>
               </View>
-              <Switch
-                value={vibrationAlerts}
-                onValueChange={setVibrationAlerts}
-                trackColor={{ false: '#334155', true: '#06B6D4' }}
-                thumbColor={vibrationAlerts ? '#F8FAFC' : '#94A3B8'}
-              />
-            </View>
-          </View>
+              <Feather name="chevron-right" size={20} color="#64748B" />
+            </TouchableOpacity>
 
-          {/* Preferences Section */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>App Preferences</Text>
-
-            <View style={styles.settingRow}>
+            {/* Device Settings Option */}
+            <TouchableOpacity 
+              style={[styles.settingRow, { borderBottomWidth: 0 }]} 
+              onPress={handleNavigateToDeviceSettings}
+              activeOpacity={0.7}
+            >
+              <View style={styles.settingIconContainer}>
+                <Feather name="cpu" size={18} color="#06B6D4" />
+              </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.settingLabel}>Dark Slate Theme</Text>
-                <Text style={styles.settingSub}>Keep dark contrast active across screens</Text>
+                <Text style={styles.settingLabel}>Device Settings</Text>
+                <Text style={styles.settingSub}>Manage paired Sonoband hardware & controls</Text>
               </View>
-              <Switch
-                value={darkMode}
-                onValueChange={setDarkMode}
-                trackColor={{ false: '#334155', true: '#06B6D4' }}
-                thumbColor={darkMode ? '#F8FAFC' : '#94A3B8'}
-              />
-            </View>
-
-            <View style={[styles.settingRow, { borderBottomWidth: 0 }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.settingLabel}>Cloud Data Sync</Text>
-                <Text style={styles.settingSub}>Automatically upload logs to Supabase</Text>
-              </View>
-              <Switch
-                value={autoSync}
-                onValueChange={setAutoSync}
-                trackColor={{ false: '#334155', true: '#06B6D4' }}
-                thumbColor={autoSync ? '#F8FAFC' : '#94A3B8'}
-              />
-            </View>
+              <Feather name="chevron-right" size={20} color="#64748B" />
+            </TouchableOpacity>
           </View>
         </ScrollView>
 
-        {/* Anchored Sign Out Button */}
+        {/* Sign Out Button */}
         <View style={styles.footerBar}>
           <TouchableOpacity style={styles.logoutBtn} onPress={handleSystemLogout} activeOpacity={0.8}>
             <Feather name="power" size={20} color="#EF4444" />
@@ -195,22 +179,30 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 16,
-    padding: 16,
+    padding: 8,
     marginBottom: 16,
     borderWidth: 1,
     borderColor: '#334155',
   },
-  cardTitle: { fontSize: 16, fontWeight: '700', color: '#F8FAFC', marginBottom: 12 },
   settingRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
   },
-  settingLabel: { color: '#F8FAFC', fontSize: 14, fontWeight: '600' },
-  settingSub: { color: '#94A3B8', fontSize: 12, marginTop: 2, paddingRight: 8 },
+  settingIconContainer: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#0F172A',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  settingLabel: { color: '#F8FAFC', fontSize: 15, fontWeight: '600' },
+  settingSub: { color: '#94A3B8', fontSize: 12, marginTop: 2 },
   footerBar: {
     paddingHorizontal: 16,
     paddingTop: 12,

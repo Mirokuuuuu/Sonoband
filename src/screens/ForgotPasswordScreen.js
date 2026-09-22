@@ -1,16 +1,38 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import { supabase } from '../services/supabaseClient';
 import bcrypt from 'react-native-bcrypt';
 
-export default function ForgotPasswordScreen({ navigation, onNavigate }) {
+export default function ForgotPasswordScreen({ navigation, onNavigate, userId, isLoggedIn }) {
   const [email, setEmail] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [secureTextEntry, setSecureTextEntry] = useState(true);
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [verifiedUserId, setVerifiedUserId] = useState(null);
+  const [userSessionActive, setUserSessionActive] = useState(Boolean(userId || isLoggedIn));
+
+  useEffect(() => {
+    // Determine active session status to handle dynamic back navigation target
+    const checkSession = async () => {
+      if (userId || isLoggedIn) {
+        setUserSessionActive(true);
+        return;
+      }
+      try {
+        const { data } = await supabase.auth.getUser();
+        if (data?.user) {
+          setUserSessionActive(true);
+        } else {
+          setUserSessionActive(false);
+        }
+      } catch (err) {
+        setUserSessionActive(false);
+      }
+    };
+    checkSession();
+  }, [userId, isLoggedIn]);
 
   const hasMinLength = newPassword.length >= 10;
   const hasUppercase = /[A-Z]/.test(newPassword);
@@ -18,10 +40,15 @@ export default function ForgotPasswordScreen({ navigation, onNavigate }) {
   const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>_\-]/.test(newPassword);
 
   const navigateToBack = () => {
+    const targetScreen = userSessionActive ? 'settings' : 'login';
+    const stackTargetScreen = userSessionActive ? 'Settings' : 'Login';
+
     if (onNavigate) {
-      onNavigate('login');
-    } else if (navigation && navigation.goBack) {
+      onNavigate(targetScreen);
+    } else if (navigation && navigation.goBack && userSessionActive) {
       navigation.goBack();
+    } else if (navigation && navigation.navigate) {
+      navigation.navigate(stackTargetScreen);
     }
   };
 
@@ -76,7 +103,7 @@ export default function ForgotPasswordScreen({ navigation, onNavigate }) {
       }
 
       Alert.alert('Success', 'Password updated successfully!', [
-        { text: 'Go to Login', onPress: () => navigateToBack() }
+        { text: userSessionActive ? 'Back to Settings' : 'Go to Login', onPress: () => navigateToBack() }
       ]);
     } catch (e) {
       Alert.alert('Exception Error', 'Failed updating records.');
@@ -154,7 +181,9 @@ export default function ForgotPasswordScreen({ navigation, onNavigate }) {
       </View>
 
       <TouchableOpacity onPress={navigateToBack} style={styles.backWrapper}>
-        <Text style={styles.linkText}>← Back to Login</Text>
+        <Text style={styles.linkText}>
+          {userSessionActive ? "← Back" : "← Back"}
+        </Text>
       </TouchableOpacity>
     </ScrollView>
   );

@@ -16,7 +16,6 @@ export default function RegisterScreen({ navigation, onNavigate }) {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [selectedRole, setSelectedRole] = useState('user');
   const [secureTextEntry, setSecureTextEntry] = useState(true);
   const [loading, setLoading] = useState(false);
 
@@ -32,11 +31,6 @@ export default function RegisterScreen({ navigation, onNavigate }) {
       navigation.navigate(screen);
     }
   };
-
-  const rolesList = [
-    { label: 'Patient / User', value: 'user', icon: 'account' },
-    { label: 'Caregiver', value: 'caregiver', icon: 'heart-pulse' },
-  ];
 
   const handleRegistration = async () => {
     const trimmedEmail = email.trim().toLowerCase();
@@ -63,7 +57,7 @@ export default function RegisterScreen({ navigation, onNavigate }) {
       const salt = bcrypt.genSaltSync(10);
       const hashedPassword = bcrypt.hashSync(trimmedPassword, salt);
 
-      // Insert record into custom users table
+      // Insert record into custom users table with default 'user' role
       const { data: dbData, error: dbError } = await supabase
         .from('users')
         .insert([
@@ -71,7 +65,7 @@ export default function RegisterScreen({ navigation, onNavigate }) {
             name: trimmedName,
             email: trimmedEmail,
             password: hashedPassword,
-            role: selectedRole,
+            role: 'user',
           },
         ])
         .select();
@@ -91,18 +85,18 @@ export default function RegisterScreen({ navigation, onNavigate }) {
         options: {
           data: { 
             full_name: trimmedName,
-            role: selectedRole 
+            role: 'user' 
           },
         },
       }).catch((err) => console.log('Auth signup rate limit ignored:', err.message));
 
-      // Added Audit Log Activity
+      // Audit Log Activity
       try {
         await logSystemActivity(
           createdUserId,
           'registration',
-          `New ${selectedRole} account registered`,
-          { role: selectedRole, ipAddress: 'Mobile App' },
+          'New user account registered',
+          { role: 'user', ipAddress: 'Mobile App' },
           trimmedName,
           trimmedEmail
         );
@@ -110,7 +104,7 @@ export default function RegisterScreen({ navigation, onNavigate }) {
         console.log('Registration audit log skipped:', auditErr.message);
       }
 
-      Alert.alert('Success', `Account created successfully as ${selectedRole === 'caregiver' ? 'Caregiver' : 'Patient'}!`, [
+      Alert.alert('Success', 'Account created successfully!', [
         { text: 'Proceed to Login', onPress: () => navigateTo('login') },
       ]);
     } catch (error) {
@@ -153,31 +147,6 @@ export default function RegisterScreen({ navigation, onNavigate }) {
             value={email} 
             onChangeText={setEmail} 
           />
-        </View>
-
-        <Text style={styles.label}>Account Role</Text>
-        <View style={styles.roleContainer}>
-          {rolesList.map((item) => {
-            const isSelected = selectedRole === item.value;
-            return (
-              <TouchableOpacity
-                key={item.value}
-                activeOpacity={0.8}
-                style={[styles.roleChip, isSelected && styles.activeRoleChip]}
-                onPress={() => setSelectedRole(item.value)}
-              >
-                <MaterialCommunityIcons 
-                  name={item.icon} 
-                  size={18} 
-                  color={isSelected ? '#0f172a' : '#94a3b8'} 
-                  style={{ marginRight: 6 }} 
-                />
-                <Text style={[styles.roleChipText, isSelected && styles.activeRoleChipText]}>
-                  {item.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
         </View>
 
         <Text style={styles.label}>Password</Text>
@@ -244,22 +213,6 @@ const styles = StyleSheet.create({
   inputIcon: { marginRight: 8 },
   input: { flex: 1, color: '#f8fafc', paddingVertical: 12, fontSize: 14 },
   eyeIcon: { padding: 8 },
-  roleContainer: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  roleChip: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#0f172a',
-    paddingVertical: 12,
-    marginHorizontal: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  activeRoleChip: { backgroundColor: '#06b6d4', borderColor: '#06b6d4' },
-  roleChipText: { color: '#94a3b8', fontSize: 13, fontWeight: '600' },
-  activeRoleChipText: { color: '#0f172a', fontWeight: '800' },
   complexityContainer: { backgroundColor: '#0f172a', padding: 12, borderRadius: 10, marginTop: 12, borderWidth: 1, borderColor: '#1e293b' },
   requirementRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
   requirementText: { color: '#ef4444', fontSize: 12, marginLeft: 6, fontWeight: '500' },

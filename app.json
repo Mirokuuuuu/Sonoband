@@ -10,6 +10,7 @@
       "supportsTablet": true
     },
     "android": {
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -28,8 +29,7 @@
     },
     "plugins": [
       "expo-asset",
-      "expo-router",
-      "react-native-ble-plx"
+      "expo-router"
     ],
     "extra": {
       "router": {},

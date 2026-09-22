@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Platform } from 'react-native';
+import 'react-native-get-random-values';
+import * as Crypto from 'expo-crypto';
+import React, { useState, useEffect, useCallback } from 'react';
+import { StyleSheet, ActivityIndicator, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo'; 
 import { supabase } from './src/services/supabaseClient';
@@ -27,11 +29,36 @@ import CaregiverDashboard from './src/screens/CaregiverDashboard';
 import CaregiverNotificationsScreen from './src/screens/CaregiverNotificationsScreen';
 import AssignedPatientsScreen from './src/screens/AssignedPatientsScreen';
 
+const ROUTE_MAPPINGS = {
+  Notifications: 'notifications',
+  Notification: 'notifications',
+  CaregiverNotifications: 'caregiverNotifications',
+  AssignedPatients: 'assignedPatients',
+  CaregiverDashboard: 'caregiverDashboard',
+  Alerts: 'alerts',
+  AlertsScreen: 'alerts',
+  AlertLogs: 'alerts',
+  FamilyGroup: 'familyGroup',
+  GroupManagement: 'groupManagement',
+  SoundManual: 'soundManual',
+  FullscreenMap: 'fullscreenMap',
+  FullScreenMap: 'fullscreenMap',
+  Map: 'fullscreenMap',
+  Settings: 'settings',
+  DeviceControl: 'deviceControl', 
+  DeviceSettings: 'deviceControl', 
+  DevicePairing: 'devicePairing',
+  Dashboard: 'dashboard',
+  Login: 'login',
+  Profile: 'profile'
+};
+
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState('login');
   const [screenParams, setScreenParams] = useState({});
   const [userId, setUserId] = useState(null); 
   const [userRole, setUserRole] = useState(null);
+  const [isLoadingSession, setIsLoadingSession] = useState(true);
 
   const [forgotPasswordSource, setForgotPasswordSource] = useState('login');
 
@@ -39,49 +66,19 @@ export default function App() {
   const [isDeviceOn, setIsDeviceOn] = useState(false);
   const [syncState, setSyncState] = useState('IDLE'); 
   const [isPhoneConnected, setIsPhoneConnected] = useState(true); 
-  const [esp32IP, setEsp32IP] = useState("192.168.43.1");
-  
-  const [notifications, setNotifications] = useState([]);
+  const [esp32IP, setEsp32IP] = useState(null);
+  const [, setNotifications] = useState([]);
 
-  // Navigation Handler with Route Parameter Support
-  const handleNavigate = (screenName, params = {}) => {
-    const screenMapping = {
-      'Notifications': 'notifications',
-      'Notification': 'notifications',
-      'CaregiverNotifications': 'caregiverNotifications',
-      'caregiverNotifications': 'caregiverNotifications',
-      'AssignedPatients': 'assignedPatients',
-      'assignedPatients': 'assignedPatients',
-      'CaregiverDashboard': 'caregiverDashboard',
-      'caregiverDashboard': 'caregiverDashboard',
-      'Alerts': 'alerts',
-      'AlertLogs': 'alerts',
-      'FamilyGroup': 'familyGroup',
-      'GroupManagement': 'groupManagement',
-      'SoundManual': 'soundManual',
-      'FullscreenMap': 'fullscreenMap',
-      'FullScreenMap': 'fullscreenMap',
-      'Map': 'fullscreenMap',
-      'Settings': 'settings',
-      'DeviceControl': 'deviceControl', 
-      'DeviceSettings': 'deviceControl', 
-      'DevicePairing': 'devicePairing',
-      'Dashboard': 'dashboard',
-      'Login': 'login',
-      'Profile': 'profile',
-      'profile': 'profile'
-    };
-
-    const targetScreen = screenMapping[screenName] || screenName;
+  // Navigation Handler
+  const handleNavigate = useCallback((screenName, params = {}) => {
+    const targetScreen = ROUTE_MAPPINGS[screenName] || screenName;
     setScreenParams(params || {});
     setCurrentScreen(targetScreen);
-  };
+  }, []);
 
-  // Universal Helper Navigation Adaptor
+  // Universal Navigation Adaptor
   const navigationAdapter = {
-    navigate: (screenName, params = {}) => {
-      handleNavigate(screenName, params);
-    },
+    navigate: (screenName, params = {}) => handleNavigate(screenName, params),
     goBack: () => {
       setScreenParams({});
       if (currentScreen === 'fullscreenMap') {
@@ -93,7 +90,7 @@ export default function App() {
       } else if (
         currentScreen === 'caregiverNotifications' || 
         currentScreen === 'assignedPatients' ||
-        (currentScreen === 'profile' && userRole === 'caregiver') // <-- FIX: Direct Caregiver Profile Back-Navigation
+        (currentScreen === 'profile' && userRole === 'caregiver')
       ) {
         setCurrentScreen('caregiverDashboard');
       } else {
@@ -102,7 +99,7 @@ export default function App() {
     }
   };
 
-  // Helper function: Resolves custom integer ID and user role from public.users
+  // Resolves integer ID and user role strictly from UUID
   const fetchNumericUserId = async (authUser) => {
     if (!authUser) {
       setUserId(null);
@@ -111,22 +108,13 @@ export default function App() {
     }
 
     try {
-      // 1. Try resolving using the 'uuid' bridge column first
-      let { data: userData } = await supabase
+      const { data: userData, error } = await supabase
         .from('users')
         .select('id, role')
         .eq('uuid', authUser.id)
         .maybeSingle();
 
-      // 2. Fallback: Query by email if 'uuid' isn't populated yet
-      if (!userData && authUser.email) {
-        const { data: userByEmail } = await supabase
-          .from('users')
-          .select('id, role')
-          .eq('email', authUser.email)
-          .maybeSingle();
-        userData = userByEmail;
-      }
+      if (error) throw error;
 
       if (userData?.id) {
         const resolvedId = Number(userData.id);
@@ -149,7 +137,6 @@ export default function App() {
     }
   };
 
-  // Centralized login event logger & navigator
   const handleUserLoginEvent = async (resolvedIdInput, resolvedRoleInput) => {
     let numericId = typeof resolvedIdInput === 'number' ? resolvedIdInput : Number(resolvedIdInput);
     let resolvedRole = resolvedRoleInput ? String(resolvedRoleInput).toLowerCase().trim() : userRole;
@@ -179,35 +166,44 @@ export default function App() {
     }
   };
 
-  // Auth Listener
+  // Single-Source Auth Listener with Loading Guard
   useEffect(() => {
-    const initSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        const userDetails = await fetchNumericUserId(session.user);
-        if (userDetails?.role === 'caregiver') {
-          handleNavigate('caregiverDashboard');
-        } else if (userDetails) {
-          handleNavigate('dashboard');
+    let mounted = true;
+
+    const syncSession = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user && mounted) {
+          const userDetails = await fetchNumericUserId(session.user);
+          if (userDetails?.role === 'caregiver') {
+            setCurrentScreen('caregiverDashboard');
+          } else if (userDetails) {
+            setCurrentScreen('dashboard');
+          }
         }
+      } finally {
+        if (mounted) setIsLoadingSession(false);
       }
     };
 
-    initSession();
+    syncSession();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        fetchNumericUserId(session.user);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user && mounted) {
+        await fetchNumericUserId(session.user);
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const handleLogout = async () => {
     try {
       if (supabase?.auth) {
-        await supabase.auth.signOut().catch(() => {});
+        await supabase.auth.signOut();
       }
     } catch (err) {
       console.log('Logout error:', err);
@@ -223,7 +219,7 @@ export default function App() {
 
   const logSystemEvent = (msg, type = "info") => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const newEntry = { id: Date.now(), text: msg, time: timestamp, type: type };
+    const newEntry = { id: Date.now(), text: msg, time: timestamp, type };
     setNotifications(prev => [newEntry, ...prev]);
   };
 
@@ -234,6 +230,15 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // Prevent flash of unauthenticated screens while session resolves
+  if (isLoadingSession) {
+    return (
+      <SafeAreaProvider style={[styles.rootProvider, styles.centered]}>
+        <ActivityIndicator size="large" color="#38BDF8" />
+      </SafeAreaProvider>
+    );
+  }
 
   // Screen Switch Router
   const renderScreen = () => {
@@ -277,7 +282,8 @@ export default function App() {
             onNavigate={handleNavigate} 
             isPhoneConnected={isPhoneConnected}            
             isDeviceConnected={syncState === 'SUCCESS'}    
-            isDeviceOn={isDeviceOn}                        
+            isDeviceOn={isDeviceOn}   
+            setIsDeviceOn={setIsDeviceOn}                     
             userId={userId} 
             currentScreen={currentScreen}
             route={{ params: screenParams }}
@@ -464,7 +470,8 @@ export default function App() {
               onNavigate={handleNavigate} 
               isPhoneConnected={isPhoneConnected}            
               isDeviceConnected={syncState === 'SUCCESS'}    
-              isDeviceOn={isDeviceOn}                        
+              isDeviceOn={isDeviceOn}  
+              setIsDeviceOn={setIsDeviceOn}                       
               userId={userId} 
               route={{ params: screenParams }}
             />
@@ -492,4 +499,8 @@ const styles = StyleSheet.create({
     flex: 1, 
     backgroundColor: '#0F172A' 
   },
+  centered: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  }
 });

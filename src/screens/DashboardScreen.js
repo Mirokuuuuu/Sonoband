@@ -5,17 +5,76 @@ import {
   View, 
   ScrollView, 
   TouchableOpacity, 
-  SafeAreaView,
   Platform,
   StatusBar,
   Alert,
-  Modal
+  Modal,
+  Image
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons, Feather } from '@expo/vector-icons';
-import * as Battery from 'expo-battery';
 import { supabase } from '../services/supabaseClient';
 
 let hasDismissedProfileAlert = false;
+
+// Custom Modal for selecting between Alert Sound Notification & Notifications
+function NotificationSelectionModal({ visible, onClose, onSelectOption }) {
+  return (
+    <Modal visible={visible} animationType="fade" transparent={true} onRequestClose={onClose}>
+      <TouchableOpacity style={modalStyles.modalOverlay} activeOpacity={1} onPress={onClose}>
+        <TouchableOpacity activeOpacity={1} style={modalStyles.modalContent}>
+          <View style={modalStyles.modalHeader}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Ionicons name="notifications" size={22} color="#38BDF8" />
+              <Text style={modalStyles.modalTitle}>Select Destination</Text>
+            </View>
+            <TouchableOpacity onPress={onClose}>
+              <Ionicons name="close-circle" size={24} color="#94A3B8" />
+            </TouchableOpacity>
+          </View>
+
+          <Text style={modalStyles.modalSubtitle}>
+            Choose where you would like to go:
+          </Text>
+
+          <TouchableOpacity 
+            style={modalStyles.optionCard}
+            onPress={() => onSelectOption('AlertsScreen')}
+            activeOpacity={0.7}
+          >
+            <View style={[modalStyles.optionIconBg, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
+              <Ionicons name="volume-high-outline" size={22} color="#38BDF8" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={modalStyles.optionTitle}>Alert Sound Notification</Text>
+              <Text style={modalStyles.optionSub}>View real-time sound detection and logs</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#64748B" />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={modalStyles.optionCard}
+            onPress={() => onSelectOption('Notifications')}
+            activeOpacity={0.7}
+          >
+            <View style={[modalStyles.optionIconBg, { backgroundColor: 'rgba(168, 85, 247, 0.15)' }]}>
+              <Ionicons name="notifications-outline" size={22} color="#A855F7" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={modalStyles.optionTitle}>Notifications</Text>
+              <Text style={modalStyles.optionSub}>General app updates and system messages</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#64748B" />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={modalStyles.cancelBtn} onPress={onClose}>
+            <Text style={modalStyles.cancelBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
 
 function DashboardTutorialModal({ visible, onClose }) {
   const steps = [
@@ -63,11 +122,12 @@ export default function DashboardScreen({
   currentScreen 
 }) {
   const [userName, setUserName] = useState('User');
-  const [batteryLevel, setBatteryLevel] = useState(null);
+  const [avatarUrl, setAvatarUrl] = useState(null);
   const [showTutorial, setShowTutorial] = useState(false);
+  const [showNotifMenu, setShowNotifMenu] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   
-  // Power state strictly tracks hardware connectivity
+  // Power state strictly tracks hardware connectivity and sync with DeviceControl
   const [devicePower, setDevicePower] = useState(false);
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
   const [deviceIp, setDeviceIp] = useState(null);
@@ -76,6 +136,15 @@ export default function DashboardScreen({
     if (navigation && typeof navigation.navigate === 'function') {
       navigation.navigate(screen, { userId, ...params });
     }
+  };
+
+  const handleNotificationPress = () => {
+    setShowNotifMenu(true);
+  };
+
+  const handleSelectNotifOption = (destinationScreen) => {
+    setShowNotifMenu(false);
+    navigateTo(destinationScreen);
   };
 
   const checkProfileCompletion = async () => {
@@ -91,6 +160,12 @@ export default function DashboardScreen({
         const resolvedName = data.name || data.full_name || data.first_name || data.username;
         const displayName = resolvedName ? String(resolvedName).split(' ')[0] : 'User';
         setUserName(displayName);
+        
+        if (data.avatar_url && String(data.avatar_url).trim()) {
+          setAvatarUrl(data.avatar_url);
+        } else {
+          setAvatarUrl(null);
+        }
 
         const missingFields = [];
         if (!resolvedName || !String(resolvedName).trim()) missingFields.push('• Full Name');
@@ -124,12 +199,12 @@ export default function DashboardScreen({
         const activeState = Boolean(dev.is_on && isRecentlyActive);
 
         setIsConnected(activeState);
-        setDevicePower(activeState);
+        setDevicePower(Boolean(dev.is_on));
         setCurrentDeviceId(dev.id);
         setDeviceIp(dev.ip_address);
 
         if (typeof setIsDeviceOn === 'function') {
-          setIsDeviceOn(activeState);
+          setIsDeviceOn(Boolean(dev.is_on));
         }
       } else {
         setIsConnected(false);
@@ -152,21 +227,7 @@ export default function DashboardScreen({
     }
   }, [userId, currentScreen]);
 
-  useEffect(() => {
-    let sub = null;
-    const setupBattery = async () => {
-      try {
-        const lvl = await Battery.getBatteryLevelAsync();
-        if (lvl !== -1) setBatteryLevel(Math.round(lvl * 100));
-        sub = Battery.addBatteryLevelListener(({ batteryLevel: newLvl }) => {
-          setBatteryLevel(Math.round(newLvl * 100));
-        });
-      } catch (e) {}
-    };
-    setupBattery();
-    return () => { if (sub) sub.remove(); };
-  }, []);
-
+  // Kept intact for synchronization with DeviceControl settings page
   const handleTogglePower = async () => {
     if (!currentDeviceId && !userId) {
       Alert.alert('No Device Paired', 'Please pair a device on the Device Pairing page before toggling power.');
@@ -176,7 +237,6 @@ export default function DashboardScreen({
     const newPowerState = !devicePower;
 
     setDevicePower(newPowerState);
-    setIsConnected(newPowerState);
     if (typeof setIsDeviceOn === 'function') setIsDeviceOn(newPowerState);
 
     try {
@@ -224,20 +284,18 @@ export default function DashboardScreen({
       if (error) {
         console.error('Database Sync Error:', error);
         setDevicePower(!newPowerState);
-        setIsConnected(!newPowerState);
         if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
         Alert.alert('Sync Error', 'Could not update power state in database.');
       }
     } catch (err) {
       console.error('Power toggle exception:', err);
       setDevicePower(!newPowerState);
-      setIsConnected(!newPowerState);
       if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
       
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -246,7 +304,11 @@ export default function DashboardScreen({
         <View style={styles.header}>
           <TouchableOpacity style={styles.userInfo} onPress={() => navigateTo('profile')} activeOpacity={0.7}>
             <View style={styles.avatarPlaceholder}>
-              <Text style={styles.avatarText}>{userName ? userName.charAt(0).toUpperCase() : 'U'}</Text>
+              {avatarUrl ? (
+                <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
+              ) : (
+                <Text style={styles.avatarText}>{userName ? userName.charAt(0).toUpperCase() : 'U'}</Text>
+              )}
             </View>
             <View style={{ marginLeft: 12 }}>
               <Text style={styles.greetingText}>Hello, {userName}!</Text>
@@ -254,8 +316,9 @@ export default function DashboardScreen({
             </View>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.notifBell} onPress={() => navigateTo('Notifications')}>
-            <Text style={{ fontSize: 11, fontWeight: 'bold', color: '#38BDF8' }}>NOTIF</Text>
+          {/* Notification Bell Button */}
+          <TouchableOpacity style={styles.notifBell} onPress={handleNotificationPress} activeOpacity={0.7}>
+            <Ionicons name="notifications-outline" size={22} color="#38BDF8" />
             <View style={styles.redBadge} />
           </TouchableOpacity>
         </View>
@@ -264,16 +327,23 @@ export default function DashboardScreen({
 
         {/* BENTO GRID AREA */}
         <View style={styles.bentoRow}>
+          {/* REPLACED BATTERY CARD -> DEVICE POWER STATUS CARD (NON-CLICKABLE) */}
           <View style={[styles.bentoCard, styles.smallCard]}>
-            <Text style={styles.cardValue}>
-              {batteryLevel !== null ? `${batteryLevel}%` : '--%'}
+            <Ionicons 
+              name={devicePower ? "power" : "power-outline"} 
+              size={24} 
+              color={devicePower ? "#22C55E" : "#EF4444"} 
+            />
+            <Text style={[styles.cardValue, { fontSize: 22, color: devicePower ? '#22C55E' : '#EF4444' }]}>
+              {devicePower ? 'ON' : 'OFF'}
             </Text>
-            <Text style={styles.cardLabel}>Phone Battery</Text>
-            <Text style={styles.batteryStatusText}>
-              {batteryLevel > 20 ? 'OPTIMAL' : 'LOW BATTERY'}
+            <Text style={styles.cardLabel}>Device Power</Text>
+            <Text style={[styles.batteryStatusText, { color: devicePower ? '#22C55E' : '#64748B' }]}>
+              {devicePower ? 'ACTIVE' : 'INACTIVE'}
             </Text>
           </View>
 
+          {/* PAIRING CARD */}
           <TouchableOpacity 
             style={[styles.bentoCard, styles.largeCard]}
             onPress={() => navigateTo('DevicePairing')}
@@ -296,24 +366,29 @@ export default function DashboardScreen({
         {/* DEVICE CONTROLS / SETTINGS CARD */}
         <TouchableOpacity 
           style={[styles.bentoCard, styles.fullWidthCard]}
-          onPress={() => navigateTo('Settings')}
+          onPress={() => navigateTo('DeviceControl')}
         >
           <View style={styles.cardHeaderRow}>
             <Text style={styles.cardTitle}>Device Controls</Text>
-            <Text style={styles.cardActionText}>SETTINGS ›</Text>
+            <Text style={styles.cardActionText}>CONTROLS ›</Text>
           </View>
           <Text style={styles.cardSubtext}>Adjust vibration intensity & sound threshold</Text>
         </TouchableOpacity>
 
-        {/* POWER TOGGLE BAR */}
+        {/* REPLACED POWER TOGGLE BAR -> GROUP MANAGEMENT CARD */}
         <TouchableOpacity 
-          style={[styles.toggleBar, devicePower ? styles.onBar : styles.offBar]}
-          onPress={handleTogglePower}
+          style={[styles.bentoCard, styles.fullWidthCard, { backgroundColor: '#1E293B', borderColor: '#334155' }]}
+          onPress={() => navigateTo('groupManagement')}
+          activeOpacity={0.7}
         >
-          <Text style={styles.toggleBarText}>
-            {devicePower ? "Device Power: ON" : "Device Power: OFF"}
-          </Text>
-          <View style={[styles.statusDot, { backgroundColor: devicePower ? '#22C55E' : '#EF4444' }]} />
+          <View style={styles.cardHeaderRow}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Ionicons name="people-outline" size={20} color="#38BDF8" />
+              <Text style={styles.cardTitle}>Group Management</Text>
+            </View>
+            <Text style={styles.cardActionText}>MANAGE ›</Text>
+          </View>
+          <Text style={styles.cardSubtext}>Manage family emergency sync & connected contacts</Text>
         </TouchableOpacity>
 
         {/* GUIDES & MANUALS - SIDE-BY-SIDE BOX SHAPES */}
@@ -348,7 +423,7 @@ export default function DashboardScreen({
           <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.navItem} onPress={() => navigateTo('Notifications')}>
+        <TouchableOpacity style={styles.navItem} onPress={handleNotificationPress}>
           <Feather name="bell" size={22} color="#94A3B8" />
           <Text style={styles.navText}>Notifications</Text>
         </TouchableOpacity>
@@ -364,21 +439,28 @@ export default function DashboardScreen({
         </TouchableOpacity>
       </View>
 
+      <NotificationSelectionModal 
+        visible={showNotifMenu} 
+        onClose={() => setShowNotifMenu(false)} 
+        onSelectOption={handleSelectNotifOption} 
+      />
+
       <DashboardTutorialModal visible={showTutorial} onClose={() => setShowTutorial(false)} />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0F172A', paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 5 : 0 },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   scrollContent: { padding: 20, paddingBottom: 90 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   userInfo: { flexDirection: 'row', alignItems: 'center' },
-  avatarPlaceholder: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#38BDF8', justifyContent: 'center', alignItems: 'center' },
+  avatarPlaceholder: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#38BDF8', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  avatarImage: { width: '100%', height: '100%', borderRadius: 21 },
   avatarText: { color: '#0F172A', fontWeight: 'bold', fontSize: 18 },
   greetingText: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC' },
-  notifBell: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12, backgroundColor: '#1E293B', borderWidth: 1, borderColor: '#334155', position: 'relative' },
-  redBadge: { position: 'absolute', top: 4, right: 4, width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444' },
+  notifBell: { padding: 10, borderRadius: 12, backgroundColor: '#1E293B', borderWidth: 1, borderColor: '#334155', position: 'relative', justifyContent: 'center', alignItems: 'center' },
+  redBadge: { position: 'absolute', top: 6, right: 6, width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444' },
   mainTitle: { fontSize: 22, fontWeight: 'bold', marginBottom: 15, color: '#F8FAFC' },
   bentoRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15 },
   bentoCard: { backgroundColor: '#1E293B', borderRadius: 18, padding: 16, borderWidth: 1, borderColor: '#334155' },
@@ -388,17 +470,12 @@ const styles = StyleSheet.create({
   fullWidthCard: { width: '100%', marginBottom: 12 },
   cardBadge: { color: '#0F172A', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, alignSelf: 'flex-start', fontSize: 10, fontWeight: 'bold' },
   cardTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC' },
-  cardValue: { fontSize: 32, fontWeight: 'bold', color: '#38BDF8' },
+  cardValue: { fontSize: 28, fontWeight: 'bold', color: '#38BDF8' },
   cardLabel: { fontSize: 12, color: '#94A3B8' },
   batteryStatusText: { fontSize: 10, fontWeight: 'bold', color: '#22C55E' },
   cardSubtext: { fontSize: 11, color: '#94A3B8', marginTop: 4 },
   cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardActionText: { fontSize: 11, fontWeight: 'bold', color: '#38BDF8' },
-  toggleBar: { borderRadius: 18, padding: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 5, borderWidth: 1 },
-  onBar: { backgroundColor: '#064E3B', borderColor: '#059669' },
-  offBar: { backgroundColor: '#451A03', borderColor: '#D97706' },
-  toggleBarText: { fontSize: 14, fontWeight: 'bold', color: '#F8FAFC' },
-  statusDot: { width: 12, height: 12, borderRadius: 6 },
   
   // Bottom Navigation Bar Styles
   bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: '#1E293B', flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#334155', paddingHorizontal: 8 },
@@ -412,6 +489,13 @@ const modalStyles = StyleSheet.create({
   modalContent: { backgroundColor: '#1E293B', borderRadius: 20, padding: 20, borderWidth: 1, borderColor: '#334155', maxHeight: '80%' },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#F8FAFC' },
+  modalSubtitle: { fontSize: 13, color: '#94A3B8', marginBottom: 16 },
+  optionCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', padding: 14, borderRadius: 14, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
+  optionIconBg: { width: 40, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  optionTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC' },
+  optionSub: { fontSize: 11, color: '#94A3B8', marginTop: 2 },
+  cancelBtn: { paddingVertical: 12, alignItems: 'center', marginTop: 4 },
+  cancelBtnText: { color: '#94A3B8', fontWeight: '600', fontSize: 14 },
   stepCard: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: '#0F172A', padding: 14, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: '#334155' },
   stepTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 4 },
   stepDesc: { fontSize: 13, color: '#94A3B8', lineHeight: 18 },
