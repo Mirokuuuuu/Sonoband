@@ -30,7 +30,11 @@ const MONTHS = [
 
 const FRIENDLY_TYPES = [
   { label: 'All Alerts', value: 'ALL', icon: 'bell' },
-  { label: 'Device & Connections', value: 'device_event', icon: 'cpu' },
+  { label: 'Device & Power', value: 'device', icon: 'cpu' },
+  { label: 'Battery', value: 'battery', icon: 'battery-charging' },
+  { label: 'Location Updates', value: 'location', icon: 'map-pin' },
+  { label: 'Settings & Sync', value: 'settings', icon: 'sliders' },
+  { label: 'Group Members', value: 'group', icon: 'users' },
 ];
 
 export default function NotificationScreen({ navigation, onNavigate, userId }) {
@@ -44,7 +48,6 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   const [selectedDay, setSelectedDay] = useState('ALL');
   const [selectedType, setSelectedType] = useState('ALL');
 
-  // Helper to standardise and parse timestamp dates
   const parseTimestamp = (dateString) => {
     if (!dateString) return null;
     let formattedStr = typeof dateString === 'string' ? dateString.trim().replace(' ', 'T') : dateString;
@@ -58,7 +61,6 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   const fetchNotifications = useCallback(async () => {
     try {
       setLoading(true);
-
       let activeNumericUserId = userId;
 
       if (!activeNumericUserId) {
@@ -98,17 +100,16 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
 
       const rawItems = notifData || [];
 
-      const operationalEvents = rawItems.map((item) => ({
+      const mappedEvents = rawItems.map((item) => ({
         id: item.id,
         rawTitle: item.title,
         rawDetails: item.message || item.metadata || '',
-        type: 'device_event',
         notification_type: item.notification_type,
         metadata: item.metadata,
         created_at: item.created_at,
       }));
 
-      setNotifications(operationalEvents);
+      setNotifications(mappedEvents);
     } catch (err) {
       console.error('Error fetching notifications:', err);
       setNotifications([]);
@@ -186,91 +187,118 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
     };
   };
 
-  const formatUserFriendlyMessage = (title, message, metadata) => {
-    const text = `${title || ''} ${message || ''} ${metadata || ''}`.toLowerCase();
+  const formatUserFriendlyMessage = (title, message, notification_type, metadata) => {
+    const text = `${title || ''} ${message || ''} ${notification_type || ''} ${metadata || ''}`.toLowerCase();
 
-    if (text.includes('registered') || text.includes('added')) {
-      return { title: title || 'Device Registered', desc: message || 'A new device was added.' };
+    // 1. Device Registration
+    if (metadata === 'REGISTERED' || text.includes('registered')) {
+      return { title: 'New Device Registered', desc: message || 'Your Sonoband device has been successfully registered.' };
     }
+
+    // 2. Explicit Device Power Toggle (Turned ON / Turned OFF)
     if (
-      text.includes('turned on') || 
-      text.includes('powered on') || 
-      text.includes('power_on') || 
-      text.includes('is_on: true') ||
-      text.includes('powered_on') ||
-      metadata === 'ON'
-    ) {
-      return { title: 'Device Turned On', desc: message || 'Your device was powered on.' };
-    }
-    if (
-      text.includes('turned off') || 
-      text.includes('powered off') || 
-      text.includes('power_off') || 
-      text.includes('is_on: false') ||
-      text.includes('powered_off') ||
+      notification_type === 'device_toggle' ||
+      text.includes('turned on') ||
+      text.includes('turned off') ||
+      text.includes('power_on') ||
+      text.includes('power_off') ||
+      metadata === 'ON' ||
       metadata === 'OFF'
     ) {
-      return { title: 'Device Turned Off', desc: message || 'Your device was powered off.' };
+      const isOff = text.includes('off') || metadata === 'OFF';
+      return {
+        title: isOff ? 'Device Turned Off' : 'Device Turned On',
+        desc: message || (isOff ? 'Your Sonoband device was turned OFF.' : 'Your Sonoband device was turned ON.'),
+      };
     }
+
+    // 3. Battery Alerts
+    if (notification_type === 'battery_update' || text.includes('battery')) {
+      if (text.includes('full') || text.includes('100') || metadata === 'FULL') {
+        return { title: 'Battery Full', desc: message || 'Sonoband device is fully charged.' };
+      }
+      return { title: 'Low Battery Warning', desc: message || 'Sonoband battery is running low. Please charge soon.' };
+    }
+
+    // 4. Location Updates
+    if (notification_type === 'location_update' || text.includes('location') || text.includes('gps') || text.includes('map')) {
+      return { title: title || 'Location Updated', desc: message || 'Map location was updated by the user or caregiver.' };
+    }
+
+    // 5. Settings Updates
+    if (notification_type === 'settings_sync' || text.includes('settings') || text.includes('sync') || text.includes('threshold') || text.includes('vibration')) {
+      return { title: title || 'Settings Synced', desc: message || 'Device configuration has been synchronized.' };
+    }
+
+    // 6. Emergency Group Updates
+    if (notification_type === 'group_update' || text.includes('member') || text.includes('joined') || text.includes('group')) {
+      return { title: title || 'New Group Member', desc: message || 'A new member has joined your Emergency Sync Group.' };
+    }
+
+    // 7. Connectivity status (Only fallback to connection/disconnection if not explicitly power)
     if (text.includes('connected') && !text.includes('disconnected')) {
       return { title: 'Device Connected', desc: message || 'Your device is connected.' };
     }
     if (text.includes('disconnected') || text.includes('timeout')) {
       return { title: 'Device Disconnected', desc: message || 'Lost connection to your device.' };
     }
-    if (text.includes('battery')) {
-      return { title: 'Battery Status', desc: message || 'Battery level updated.' };
-    }
-    if (text.includes('gps') || text.includes('location')) {
-      return { title: 'Location Update', desc: message || 'Location data refreshed.' };
-    }
 
-    return { title: title || 'Notification', desc: message || 'System event recorded.' };
+    return { title: title || 'System Notification', desc: message || 'System activity logged.' };
   };
 
-  const getEventIcon = (title, message, type, metadata) => {
-    const text = `${title || ''} ${message || ''} ${type || ''} ${metadata || ''}`.toLowerCase();
+  const getEventIcon = (title, message, notification_type, metadata) => {
+    const text = `${title || ''} ${message || ''} ${notification_type || ''} ${metadata || ''}`.toLowerCase();
 
-    if (
-      text.includes('turned on') || 
-      text.includes('powered on') || 
-      text.includes('power_on') || 
-      text.includes('is_on: true') ||
-      text.includes('powered_on') ||
-      metadata === 'ON'
-    ) {
-      return { icon: 'toggle-right', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.1)' };
+    if (metadata === 'REGISTERED' || text.includes('registered')) {
+      return { icon: 'plus-circle', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'device' };
     }
+
+    // Power Status Icon (Red power icon for OFF, Green power icon for ON)
     if (
-      text.includes('turned off') || 
-      text.includes('powered off') || 
-      text.includes('power_off') || 
-      text.includes('is_on: false') ||
-      text.includes('powered_off') ||
+      notification_type === 'device_toggle' ||
+      text.includes('turned on') ||
+      text.includes('turned off') ||
+      text.includes('power_on') ||
+      text.includes('power_off') ||
+      metadata === 'ON' ||
       metadata === 'OFF'
     ) {
-      return { icon: 'toggle-left', color: '#64748B', bg: 'rgba(100, 116, 139, 0.1)' };
-    }
-    if (text.includes('connected') && !text.includes('disconnected')) {
-      return { icon: 'bluetooth', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.1)' };
-    }
-    if (text.includes('disconnected') || text.includes('timeout')) {
-      return { icon: 'slash', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.1)' };
-    }
-    if (text.includes('battery')) {
-      return { icon: 'battery-charging', color: '#EAB308', bg: 'rgba(234, 179, 8, 0.1)' };
-    }
-    if (text.includes('threshold') || text.includes('vibration') || text.includes('firmware') || text.includes('synced')) {
-      return { icon: 'sliders', color: '#06B6D4', bg: 'rgba(6, 182, 212, 0.1)' };
-    }
-    if (text.includes('gps') || text.includes('location')) {
-      return { icon: 'map-pin', color: '#F97316', bg: 'rgba(249, 115, 22, 0.1)' };
-    }
-    if (text.includes('family') || text.includes('invite') || text.includes('group')) {
-      return { icon: 'users', color: '#A855F7', bg: 'rgba(168, 85, 247, 0.1)' };
+      const isOff = text.includes('off') || metadata === 'OFF';
+      return {
+        icon: 'power',
+        color: isOff ? '#EF4444' : '#22C55E',
+        bg: isOff ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 197, 94, 0.15)',
+        category: 'device',
+      };
     }
 
-    return { icon: 'bell', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.1)' };
+    if (notification_type === 'battery_update' || text.includes('battery')) {
+      if (text.includes('full') || text.includes('100') || metadata === 'FULL') {
+        return { icon: 'battery-charging', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)', category: 'battery' };
+      }
+      return { icon: 'battery', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'battery' };
+    }
+
+    if (notification_type === 'location_update' || text.includes('location') || text.includes('gps') || text.includes('map')) {
+      return { icon: 'map-pin', color: '#F97316', bg: 'rgba(249, 115, 22, 0.15)', category: 'location' };
+    }
+
+    if (notification_type === 'settings_sync' || text.includes('settings') || text.includes('sync') || text.includes('threshold') || text.includes('vibration')) {
+      return { icon: 'sliders', color: '#06B6D4', bg: 'rgba(6, 182, 212, 0.15)', category: 'settings' };
+    }
+
+    if (notification_type === 'group_update' || text.includes('member') || text.includes('joined') || text.includes('group')) {
+      return { icon: 'user-plus', color: '#A855F7', bg: 'rgba(168, 85, 247, 0.15)', category: 'group' };
+    }
+
+    if (text.includes('connected') && !text.includes('disconnected')) {
+      return { icon: 'link', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)', category: 'device' };
+    }
+    if (text.includes('disconnected') || text.includes('timeout')) {
+      return { icon: 'link-2', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'device' };
+    }
+
+    return { icon: 'bell', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'device' };
   };
 
   const filteredNotifications = useMemo(() => {
@@ -284,8 +312,9 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
       if (selectedMonth !== 'ALL' && itemMonth !== selectedMonth) return false;
       if (selectedDay !== 'ALL' && itemDay !== selectedDay) return false;
 
-      if (selectedType === 'device_event' && item.type !== 'device_event') {
-        return false;
+      if (selectedType !== 'ALL') {
+        const iconConfig = getEventIcon(item.rawTitle, item.rawDetails, item.notification_type, item.metadata);
+        if (iconConfig.category !== selectedType) return false;
       }
 
       return true;
@@ -309,18 +338,18 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
         </TouchableOpacity>
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text style={styles.headerTitle}>Notifications</Text>
-          <Text style={styles.headerSub}>Activity & Activity History</Text>
+          <Text style={styles.headerSub}>Activity & System Updates</Text>
         </View>
       </View>
 
-      {/* Filter Section */}
+      {/* Filter Bar */}
       <View style={styles.filterBar}>
         <Text style={styles.filterLabel}>Show Activity Type</Text>
         <ScrollView 
           horizontal 
           showsHorizontalScrollIndicator={false} 
           style={styles.horizontalScroll}
-          contentContainerStyle={{ gap: 8, paddingRight: 16 }}
+          contentContainerStyle={{ alignItems: 'center', paddingRight: 16 }}
         >
           {FRIENDLY_TYPES.map((t) => {
             const isSelected = selectedType === t.value;
@@ -345,7 +374,12 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
         </ScrollView>
 
         <Text style={styles.filterLabel}>Month</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalScroll}>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.horizontalScroll}
+          contentContainerStyle={{ alignItems: 'center', paddingRight: 16 }}
+        >
           {MONTHS.map((m) => {
             const isFutureMonth = typeof m.value === 'number' && m.value > today.getMonth();
             const isSelected = selectedMonth === m.value;
@@ -369,7 +403,12 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
         </ScrollView>
 
         <Text style={styles.filterLabel}>Day</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalScroll}>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.horizontalScroll}
+          contentContainerStyle={{ alignItems: 'center', paddingRight: 16 }}
+        >
           <TouchableOpacity
             style={[styles.chip, selectedDay === 'ALL' && styles.chipActive]}
             onPress={() => setSelectedDay('ALL')}
@@ -401,7 +440,7 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
         </ScrollView>
       </View>
 
-      {/* List Content */}
+      {/* Notifications List */}
       {loading ? (
         <ActivityIndicator size="large" color="#06B6D4" style={{ marginTop: 40 }} />
       ) : (
@@ -419,13 +458,13 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Feather name="bell-off" size={48} color="#475569" />
-              <Text style={styles.emptyText}>No activity recorded for this date.</Text>
+              <Text style={styles.emptyText}>No notifications found for this selection.</Text>
             </View>
           }
           renderItem={({ item }) => {
             const { dateStr, timeStr } = formatLocalDateTime(item.created_at);
-            const friendly = formatUserFriendlyMessage(item.rawTitle, item.rawDetails, item.metadata);
-            const iconConfig = getEventIcon(item.rawTitle, item.rawDetails, item.type, item.metadata);
+            const friendly = formatUserFriendlyMessage(item.rawTitle, item.rawDetails, item.notification_type, item.metadata);
+            const iconConfig = getEventIcon(item.rawTitle, item.rawDetails, item.notification_type, item.metadata);
 
             return (
               <View style={styles.itemCard}>
@@ -466,7 +505,6 @@ const styles = StyleSheet.create({
   iconButton: { padding: 8, borderRadius: 10, backgroundColor: '#334155' },
   headerTitle: { fontSize: 20, fontWeight: '700', color: '#F8FAFC' },
   headerSub: { fontSize: 12, color: '#94A3B8' },
-  
   filterBar: {
     backgroundColor: '#1E293B',
     paddingHorizontal: 16,
@@ -483,7 +521,6 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   horizontalScroll: {
-    flexDirection: 'row',
     marginBottom: 6,
   },
   typeChip: {
@@ -496,6 +533,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: '#334155',
+    marginRight: 6,
   },
   chipIcon: {
     marginRight: 6,
@@ -528,7 +566,6 @@ const styles = StyleSheet.create({
   chipTextDisabled: {
     color: '#475569',
   },
-
   itemCard: {
     backgroundColor: '#1E293B',
     borderRadius: 12,

@@ -14,7 +14,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { supabase } from '../services/supabaseClient';
 
-export default function DeviceControlScreen({ navigation, onNavigate, userId }) {
+export default function DeviceControlScreen({ 
+  navigation, 
+  onNavigate, 
+  userId, 
+  isDeviceOn, 
+  setIsDeviceOn 
+}) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deviceId, setDeviceId] = useState(null);
@@ -22,9 +28,13 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
   const [macAddress, setMacAddress] = useState(null);
 
   // Device Settings State
-  const [devicePower, setDevicePower] = useState(false);
+  const [devicePower, setDevicePower] = useState(isDeviceOn || false);
   const [vibrationLevel, setVibrationLevel] = useState('medium'); // 'low', 'medium', 'high'
   const [micRange, setMicRange] = useState('narrow'); // 'narrow', 'broad'
+
+  // Initial loaded states to check if values changed on Save
+  const [initialVibration, setInitialVibration] = useState('medium');
+  const [initialMicRange, setInitialMicRange] = useState('narrow');
 
   // Reference to background keep-alive ping interval
   const pingIntervalRef = useRef(null);
@@ -33,9 +43,12 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
   const createNotification = async (type, title, message, metadata) => {
     if (!userId) return;
     try {
+      const parsedUserId = parseInt(userId, 10);
+      if (isNaN(parsedUserId)) return;
+
       await supabase.from('notifications').insert([
         {
-          user_id: parseInt(userId, 10),
+          user_id: parsedUserId,
           notification_type: type,
           title: title,
           message: message,
@@ -53,32 +66,48 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
     fetchDeviceSettings();
   }, [userId]);
 
+  // Sync prop changes from App.js if available
+  useEffect(() => {
+    if (typeof isDeviceOn === 'boolean') {
+      setDevicePower(isDeviceOn);
+    }
+  }, [isDeviceOn]);
+
   // Background Heartbeat Loop to keep ESP32 alive
   useEffect(() => {
-    if (deviceIp && devicePower) {
+    if (deviceIp) {
       pingIntervalRef.current = setInterval(async () => {
         try {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-          await fetch(`http://${deviceIp}:5000/ping`, {
+          const response = await fetch(`http://${deviceIp}:5000/ping`, {
             method: 'GET',
             signal: controller.signal,
           });
 
           clearTimeout(timeoutId);
+          if (!response.ok) {
+            console.log('[Heartbeat] Ping returned non-OK status');
+          }
         } catch (error) {
           console.log('[Heartbeat] Ping missed:', error.message);
         }
       }, 5000);
+    } else {
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
     }
 
     return () => {
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
       }
     };
-  }, [deviceIp, devicePower]);
+  }, [deviceIp]);
 
   const fetchDeviceSettings = async () => {
     if (!userId) {
@@ -106,31 +135,42 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
         setMacAddress(device.mac_address || null);
         setDeviceIp(device.ip_address || device.ip);
 
-        // Power Status
-        setDevicePower(device.is_on === true);
-
-        // Parse Vibration Level
-        if (device.vibration_intensity !== null && device.vibration_intensity !== undefined) {
-          if (typeof device.vibration_intensity === 'string') {
-            setVibrationLevel(device.vibration_intensity);
-          } else {
-            setVibrationLevel(
-              device.vibration_intensity <= 2 ? 'low' : device.vibration_intensity >= 4 ? 'high' : 'medium'
-            );
-          }
+        // Power Status strictly adheres to DB value
+        const isDbOn = Boolean(device.is_on);
+        setDevicePower(isDbOn);
+        if (typeof setIsDeviceOn === 'function') {
+          setIsDeviceOn(isDbOn);
         }
 
+        // Parse Vibration Level
+        let loadedVib = 'medium';
+        if (device.vibration_intensity !== null && device.vibration_intensity !== undefined) {
+          if (typeof device.vibration_intensity === 'string') {
+            loadedVib = device.vibration_intensity;
+          } else {
+            loadedVib = device.vibration_intensity <= 2 ? 'low' : device.vibration_intensity >= 4 ? 'high' : 'medium';
+          }
+        }
+        setVibrationLevel(loadedVib);
+        setInitialVibration(loadedVib);
+
         // Parse Sound Threshold / Range
+        let loadedRange = 'narrow';
         const rawSensitivity = device.sound_threshold ?? device.sensitivity;
         if (rawSensitivity !== null && rawSensitivity !== undefined) {
           if (typeof rawSensitivity === 'string') {
-            setMicRange(rawSensitivity);
+            loadedRange = rawSensitivity;
           } else {
-            setMicRange(rawSensitivity >= 65 ? 'narrow' : 'broad');
+            loadedRange = rawSensitivity >= 65 ? 'narrow' : 'broad';
           }
         }
+        setMicRange(loadedRange);
+        setInitialMicRange(loadedRange);
       } else {
         setDevicePower(false);
+        if (typeof setIsDeviceOn === 'function') {
+          setIsDeviceOn(false);
+        }
       }
     } catch (err) {
       console.error('Error loading device settings:', err);
@@ -140,25 +180,20 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
   };
 
   // Dispatch HTTP commands directly to ESP32 WebServer
-  const sendHardwareCommand = async (ip, action, payload = {}) => {
+  const sendHardwareCommand = async (ip, endpoint, payload = {}) => {
     if (!ip) return false;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     try {
-      let endpoint = `http://${ip}:5000/config`;
-
-      if (action === 'power_on') {
-        endpoint = `http://${ip}:5000/connect`;
-      } else if (action === 'power_off') {
-        endpoint = `http://${ip}:5000/disconnect`;
-      }
-
-      const response = await fetch(endpoint, {
+      const response = await fetch(`http://${ip}:5000/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          user_id: userId,
+          ...payload,
+        }),
         signal: controller.signal,
       });
 
@@ -166,7 +201,7 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
       return response.ok;
     } catch (e) {
       clearTimeout(timeoutId);
-      console.warn(`Hardware HTTP command [${action}] failed for ${ip}:`, e.message);
+      console.warn(`Hardware HTTP command [${endpoint}] failed for ${ip}:`, e.message);
       return false;
     }
   };
@@ -174,13 +209,16 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
   // Power switch toggle handler
   const handlePowerToggle = async (newValue) => {
     setDevicePower(newValue);
+    if (typeof setIsDeviceOn === 'function') {
+      setIsDeviceOn(newValue);
+    }
 
     if (deviceIp) {
-      if (newValue) {
-        await sendHardwareCommand(deviceIp, 'power_on', { is_on: true });
-      } else {
-        await sendHardwareCommand(deviceIp, 'power_off', { is_on: false });
-      }
+      await sendHardwareCommand(deviceIp, 'config', { 
+        is_on: newValue,
+        vibration_intensity: vibrationLevel,
+        sound_threshold: micRange 
+      });
     }
 
     if (!userId) return;
@@ -203,7 +241,7 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
       await createNotification(
         'device_toggle',
         `Device Turned ${statusText}`,
-        `Your SonoBand device was ${actionText}`,
+        `Your Sonoband device was ${actionText}`,
         statusText
       );
     } catch (err) {
@@ -211,7 +249,7 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
     }
   };
 
-  // Save settings and redirect to Dashboard
+  // Save settings and trigger notification creation
   const handleSaveSettings = async () => {
     if (!userId) return;
 
@@ -227,7 +265,7 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
 
       // 1. Push settings directly to ESP32
       if (deviceIp) {
-        await sendHardwareCommand(deviceIp, 'update_config', settingsPayload);
+        await sendHardwareCommand(deviceIp, 'config', settingsPayload);
       }
 
       // 2. Sync settings into Supabase
@@ -249,9 +287,33 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
       const { error } = await query;
       if (error) throw error;
 
+      // 3. Create Notification for Settings/Thresholds Changes
+      const changedVibration = initialVibration !== vibrationLevel;
+      const changedMicRange = initialMicRange !== micRange;
+
+      if (changedVibration || changedMicRange) {
+        const changesText = [];
+        if (changedVibration) {
+          changesText.push(`Vibration set to ${vibrationLevel.toUpperCase()}`);
+        }
+        if (changedMicRange) {
+          changesText.push(`Microphone range set to ${micRange.toUpperCase()}`);
+        }
+
+        await createNotification(
+          'settings_sync',
+          'Device Settings Updated',
+          `Your settings were adjusted: ${changesText.join(', ')}.`,
+          vibrationLevel.toUpperCase()
+        );
+
+        setInitialVibration(vibrationLevel);
+        setInitialMicRange(micRange);
+      }
+
       Alert.alert(
         'Settings Applied',
-        'Your SonoBand settings have been updated successfully.',
+        'Your Sonoband settings have been updated successfully.',
         [
           {
             text: 'OK',
@@ -319,7 +381,7 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
               />
             </View>
             <Text style={styles.cardSubtext}>
-              Turn your SonoBand ON to start detecting sound alerts, or OFF to pause sampling and conserve battery.
+              Turn your Sonoband ON to start detecting sound alerts, or OFF to pause sampling and conserve battery.
             </Text>
 
             <View style={[styles.statusBadge, devicePower ? styles.badgeOn : styles.badgeOff]}>
@@ -412,15 +474,8 @@ export default function DeviceControlScreen({ navigation, onNavigate, userId }) 
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0F172A',
-  },
-  center: {
-    flex: 1,
-    justify: 'center',
-    alignItems: 'center',
-  },
+  container: { flex: 1, backgroundColor: '#0F172A' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -430,17 +485,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#1E293B',
   },
-  backButton: {
-    padding: 4,
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
-  },
-  scrollContent: {
-    padding: 20,
-  },
+  backButton: { padding: 4 },
+  headerTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC' },
+  scrollContent: { padding: 20 },
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 18,
@@ -449,27 +496,10 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
     marginBottom: 16,
   },
-  cardActiveBorder: {
-    borderColor: '#16A34A',
-  },
-  cardTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 4,
-  },
-  cardTitle: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
-  },
-  cardSubtext: {
-    fontSize: 12,
-    color: '#94A3B8',
-    marginTop: 4,
-    marginBottom: 12,
-    lineHeight: 18,
-  },
+  cardActiveBorder: { borderColor: '#16A34A' },
+  cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  cardTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC' },
+  cardSubtext: { fontSize: 12, color: '#94A3B8', marginTop: 4, marginBottom: 12, lineHeight: 18 },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -479,33 +509,14 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     gap: 6,
   },
-  badgeOn: {
-    backgroundColor: '#14532D',
-  },
-  badgeOff: {
-    backgroundColor: '#0F172A',
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  dotOn: {
-    backgroundColor: '#22C55E',
-  },
-  dotOff: {
-    backgroundColor: '#64748B',
-  },
-  statusBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  textOn: {
-    color: '#4ADE80',
-  },
-  textOff: {
-    color: '#94A3B8',
-  },
+  badgeOn: { backgroundColor: '#14532D' },
+  badgeOff: { backgroundColor: '#0F172A' },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  dotOn: { backgroundColor: '#22C55E' },
+  dotOff: { backgroundColor: '#64748B' },
+  statusBadgeText: { fontSize: 12, fontWeight: '600' },
+  textOn: { color: '#4ADE80' },
+  textOff: { color: '#94A3B8' },
   segmentContainer: {
     flexDirection: 'row',
     backgroundColor: '#0F172A',
@@ -514,35 +525,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155',
   },
-  segmentButton: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderRadius: 8,
-  },
-  segmentActive: {
-    backgroundColor: '#38BDF8',
-  },
-  segmentText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#94A3B8',
-  },
-  segmentTextActive: {
-    color: '#0F172A',
-    fontWeight: '700',
-  },
-  rangeDescription: {
-    fontSize: 11,
-    color: '#38BDF8',
-    marginTop: 10,
-    fontStyle: 'italic',
-  },
-  toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justify: 'space-between',
-  },
+  segmentButton: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 8 },
+  segmentActive: { backgroundColor: '#38BDF8' },
+  segmentText: { fontSize: 13, fontWeight: '600', color: '#94A3B8' },
+  segmentTextActive: { color: '#0F172A', fontWeight: '700' },
+  rangeDescription: { fontSize: 11, color: '#38BDF8', marginTop: 10, fontStyle: 'italic' },
+  toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   applyButton: {
     backgroundColor: '#38BDF8',
     borderRadius: 14,
@@ -550,9 +538,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 8,
   },
-  applyButtonText: {
-    color: '#0F172A',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
+  applyButtonText: { color: '#0F172A', fontWeight: 'bold', fontSize: 15 },
 });

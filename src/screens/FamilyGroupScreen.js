@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { Ionicons, Feather } from '@expo/vector-icons';
+import * as Location from 'expo-location';
 import { supabase, logSystemActivity } from '../services/supabaseClient';
 
 export default function FamilyGroupScreen({ route, navigation, onNavigate, userRole }) {
@@ -33,16 +34,21 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userR
   const [loading, setLoading] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const [currentUserId, setCurrentUserId] = useState(null);
+  const [currentUserName, setCurrentUserName] = useState('You');
   const [actionLoading, setActionLoading] = useState(false);
 
   // Dynamic coordinates fetched from live user locations
   const [mapCoords, setMapCoords] = useState({ latitude: 14.5800, longitude: 121.0600 });
 
+  // Sync user location every time group ID changes or screen mounts
+  useEffect(() => {
+    syncAndFetchUserLocation();
+  }, [selectedGroup.id]);
+
   useEffect(() => {
     fetchUserAndRoleStatus();
     if (selectedGroup.id) {
       fetchGroupDetails();
-      fetchGroupLocation();
     }
   }, [selectedGroup.id]);
 
@@ -58,7 +64,10 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userR
         .maybeSingle();
 
       const activeUserId = userData?.id || userData?.user_id || user.id;
+      const userName = userData?.full_name || userData?.name || 'You';
+      
       setCurrentUserId(activeUserId);
+      setCurrentUserName(userName);
 
       // Check ownership
       const ownerMatch =
@@ -71,7 +80,39 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userR
     }
   };
 
-  const fetchGroupLocation = async () => {
+  // Requests GPS permission, updates user position, and syncs with Supabase
+  const syncAndFetchUserLocation = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('Location permission not granted');
+        fetchFallbackGroupLocation();
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = location.coords;
+      setMapCoords({ latitude, longitude });
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        await supabase.from('user_locations').upsert({
+          user_id: user.id,
+          latitude,
+          longitude,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id' });
+      }
+    } catch (err) {
+      console.log('Error syncing location, falling back:', err.message);
+      fetchFallbackGroupLocation();
+    }
+  };
+
+  const fetchFallbackGroupLocation = async () => {
     try {
       const { data: locData } = await supabase
         .from('user_locations')
@@ -251,7 +292,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userR
         });
 
         L.marker([${mapCoords.latitude}], [${mapCoords.longitude}], {icon: customIcon}).addTo(map)
-          .bindPopup("<b>SonoBand Member</b><br>Active location");
+          .bindPopup("<b>👤 ${currentUserName}</b><br>Live Location").openPopup();
       </script>
     </body>
     </html>

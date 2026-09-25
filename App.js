@@ -1,7 +1,7 @@
 import 'react-native-get-random-values';
 import * as Crypto from 'expo-crypto';
 import React, { useState, useEffect, useCallback } from 'react';
-import { StyleSheet, ActivityIndicator, View } from 'react-native';
+import { StyleSheet, ActivityIndicator } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo'; 
 import { supabase } from './src/services/supabaseClient';
@@ -54,7 +54,7 @@ const ROUTE_MAPPINGS = {
 };
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState('login');
+  const [navHistory, setNavHistory] = useState(['login']);
   const [screenParams, setScreenParams] = useState({});
   const [userId, setUserId] = useState(null); 
   const [userRole, setUserRole] = useState(null);
@@ -62,40 +62,30 @@ export default function App() {
 
   const [forgotPasswordSource, setForgotPasswordSource] = useState('login');
 
-  // Global Hardware & Network States
+  // Global Hardware & Network States (Defaults Strictly to FALSE)
   const [isDeviceOn, setIsDeviceOn] = useState(false);
   const [syncState, setSyncState] = useState('IDLE'); 
   const [isPhoneConnected, setIsPhoneConnected] = useState(true); 
   const [esp32IP, setEsp32IP] = useState(null);
-  const [, setNotifications] = useState([]);
 
-  // Navigation Handler
-  const handleNavigate = useCallback((screenName, params = {}) => {
+  const currentScreen = navHistory[navHistory.length - 1] || 'login';
+
+  // Navigation Handlers
+  const handleNavigate = useCallback((screenName, params = {}, resetStack = false) => {
     const targetScreen = ROUTE_MAPPINGS[screenName] || screenName;
     setScreenParams(params || {});
-    setCurrentScreen(targetScreen);
+    
+    setNavHistory(prev => (resetStack ? [targetScreen] : [...prev, targetScreen]));
   }, []);
 
-  // Universal Navigation Adaptor
   const navigationAdapter = {
     navigate: (screenName, params = {}) => handleNavigate(screenName, params),
     goBack: () => {
       setScreenParams({});
-      if (currentScreen === 'fullscreenMap') {
-        setCurrentScreen('familyGroup');
-      } else if (currentScreen === 'familyGroup') {
-        setCurrentScreen('groupManagement');
-      } else if (currentScreen === 'login' || currentScreen === 'register') {
-        setCurrentScreen('login');
-      } else if (
-        currentScreen === 'caregiverNotifications' || 
-        currentScreen === 'assignedPatients' ||
-        (currentScreen === 'profile' && userRole === 'caregiver')
-      ) {
-        setCurrentScreen('caregiverDashboard');
-      } else {
-        setCurrentScreen(userRole === 'caregiver' ? 'caregiverDashboard' : 'dashboard');
-      }
+      setNavHistory(prev => {
+        if (prev.length <= 1) return prev;
+        return prev.slice(0, -1);
+      });
     }
   };
 
@@ -153,32 +143,26 @@ export default function App() {
         setUserId(numericId);
         setUserRole(resolvedRole);
       }
-
-      logSystemEvent("User session validated.", "info");
     } catch (err) {
       console.log('Login event setup skipped:', err.message);
     }
 
-    if (resolvedRole === 'caregiver') {
-      handleNavigate('caregiverDashboard');
-    } else {
-      handleNavigate('dashboard');
-    }
+    const initialScreen = resolvedRole === 'caregiver' ? 'caregiverDashboard' : 'dashboard';
+    handleNavigate(initialScreen, {}, true);
   };
 
-  // Single-Source Auth Listener with Loading Guard
+  // Session Listener & Sync
   useEffect(() => {
     let mounted = true;
 
-    const syncSession = async () => {
+    const initAuth = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user && mounted) {
           const userDetails = await fetchNumericUserId(session.user);
-          if (userDetails?.role === 'caregiver') {
-            setCurrentScreen('caregiverDashboard');
-          } else if (userDetails) {
-            setCurrentScreen('dashboard');
+          if (userDetails) {
+            const initialScreen = userDetails.role === 'caregiver' ? 'caregiverDashboard' : 'dashboard';
+            setNavHistory([initialScreen]);
           }
         }
       } finally {
@@ -186,10 +170,16 @@ export default function App() {
       }
     };
 
-    syncSession();
+    initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user && mounted) {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_OUT') {
+        setUserId(null);
+        setUserRole(null);
+        setIsDeviceOn(false);
+        setSyncState('IDLE');
+        setNavHistory(['login']);
+      } else if (session?.user && mounted) {
         await fetchNumericUserId(session.user);
       }
     });
@@ -213,14 +203,8 @@ export default function App() {
       setIsDeviceOn(false);
       setSyncState('IDLE');
       setScreenParams({});
-      setCurrentScreen('login');
+      setNavHistory(['login']);
     }
-  };
-
-  const logSystemEvent = (msg, type = "info") => {
-    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const newEntry = { id: Date.now(), text: msg, time: timestamp, type };
-    setNotifications(prev => [newEntry, ...prev]);
   };
 
   // Real-time Network Listener
@@ -231,7 +215,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Prevent flash of unauthenticated screens while session resolves
   if (isLoadingSession) {
     return (
       <SafeAreaProvider style={[styles.rootProvider, styles.centered]}>
@@ -470,8 +453,8 @@ export default function App() {
               onNavigate={handleNavigate} 
               isPhoneConnected={isPhoneConnected}            
               isDeviceConnected={syncState === 'SUCCESS'}    
-              isDeviceOn={isDeviceOn}  
-              setIsDeviceOn={setIsDeviceOn}                       
+              isDeviceOn={isDeviceOn}   
+              setIsDeviceOn={setIsDeviceOn}                      
               userId={userId} 
               route={{ params: screenParams }}
             />

@@ -29,7 +29,6 @@ export default function DevicePairingScreen({
   const [pairedDevices, setPairedDevices] = useState([]);
   const [isRegisterModalVisible, setIsRegisterModalVisible] = useState(false);
 
-  // Registration Form States
   const [deviceNameInput, setDeviceNameInput] = useState('');
   const [macAddressInput, setMacAddressInput] = useState('');
   const [ipAddressInput, setIpAddressInput] = useState(deviceIp || '');
@@ -37,13 +36,15 @@ export default function DevicePairingScreen({
 
   const isValidUserId = (id) => id !== null && id !== undefined && String(id).trim().length > 0;
 
-  // Helper function to insert notifications into public.notifications
   const createNotification = async (type, title, message, metadata) => {
     if (!isValidUserId(userId)) return;
     try {
+      const parsedUserId = parseInt(userId, 10);
+      if (isNaN(parsedUserId)) return;
+
       await supabase.from('notifications').insert([
         {
-          user_id: parseInt(userId, 10),
+          user_id: parsedUserId,
           notification_type: type,
           title: title,
           message: message,
@@ -60,10 +61,13 @@ export default function DevicePairingScreen({
     if (!isValidUserId(userId)) return;
 
     try {
+      const parsedUserId = parseInt(userId, 10);
+      const queryId = isNaN(parsedUserId) ? userId : parsedUserId;
+
       const { data, error } = await supabase
         .from('user_devices')
         .select('*')
-        .eq('user_id', userId);
+        .eq('user_id', queryId);
 
       if (error) throw error;
       setPairedDevices(data || []);
@@ -76,26 +80,24 @@ export default function DevicePairingScreen({
     fetchPairedDevices();
   }, [fetchPairedDevices]);
 
-  // Send connect/disconnect commands aligned with ESP32 WebServer
-  const sendHardwareCommand = async (ip, action) => {
+  const sendHardwareCommand = async (ip, endpoint, payload = {}) => {
     if (!ip) {
       console.warn('Cannot send hardware command: IP address missing.');
       return false;
     }
 
-    const isStart = action === 'start';
-    const endpoint = `http://${ip}:5000/${isStart ? 'connect' : 'disconnect'}`;
-
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3500);
 
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
+      const res = await fetch(`http://${ip}:5000/${endpoint}`, {
+        method: endpoint === 'ping' ? 'GET' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          is_on: isStart,
+        ...(endpoint !== 'ping' && {
+          body: JSON.stringify({
+            user_id: userId,
+            ...payload,
+          }),
         }),
         signal: controller.signal,
       });
@@ -103,7 +105,7 @@ export default function DevicePairingScreen({
       return res.ok;
     } catch (e) {
       clearTimeout(timeoutId);
-      console.warn(`Hardware command [${action}] failed for IP ${ip}:`, e.message);
+      console.warn(`Hardware command [${endpoint}] failed for IP ${ip}:`, e.message);
       return false;
     }
   };
@@ -117,33 +119,41 @@ export default function DevicePairingScreen({
         throw new Error('No valid IP address associated with this device.');
       }
 
+      // Ping check before declaring connected
+      const isAlive = await sendHardwareCommand(resolvedIp, 'ping');
+      if (!isAlive) {
+        throw new Error('Could not connect to device over network. Ensure it is powered ON and on the same Wi-Fi.');
+      }
+
       if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
 
-      await sendHardwareCommand(resolvedIp, 'start');
+      // Notify ESP32 over HTTP
+      await sendHardwareCommand(resolvedIp, 'connect');
 
       await supabase
         .from('user_devices')
-        .update({ is_on: true, last_seen: new Date().toISOString() })
+        .update({ is_on: false, last_seen: new Date().toISOString(), ip_address: resolvedIp })
         .eq('id', device.id);
 
-      // Log notification entry for successful pairing/connection
       await createNotification(
-        'connection_event',
+        'device_registration',
         'Device Connected',
-        `Connected to ${device.device_name || 'SonoBand'}`,
-        'connected'
+        `Connected to ${device.device_name || 'SonoBand'} successfully. Device set to Standby.`,
+        'OFF'
       );
 
       if (typeof onSelectDevice === 'function') {
-        onSelectDevice(device);
-      } else if (typeof setSyncState === 'function') {
+        onSelectDevice({ ...device, is_on: false, ip_address: resolvedIp });
+      }
+      
+      if (typeof setSyncState === 'function') {
         setSyncState('SUCCESS');
       }
 
-      Alert.alert('Connected', `Connected to ${device.device_name}.`);
+      Alert.alert('Connected', `Connected to ${device.device_name} successfully (Standby mode). Use Device Controls to turn ON.`);
       fetchPairedDevices();
     } catch (err) {
-      if (typeof setSyncState === 'function') setSyncState('FAILED');
+      if (typeof setSyncState === 'function') setSyncState('IDLE');
       Alert.alert('Connection Failed', err.message);
     }
   };
@@ -159,12 +169,13 @@ export default function DevicePairingScreen({
             const resolvedIp = device.ip_address || deviceIp;
 
             if (resolvedIp) {
-              await sendHardwareCommand(resolvedIp, 'stop');
+              await sendHardwareCommand(resolvedIp, 'disconnect');
             }
 
+            // Set last_seen to 1970 epoch so recent activity checks fail
             const { error } = await supabase
               .from('user_devices')
-              .update({ is_on: false, last_seen: new Date().toISOString() })
+              .update({ is_on: false, last_seen: new Date(0).toISOString() })
               .eq('id', device.id);
 
             if (error) throw error;
@@ -177,13 +188,12 @@ export default function DevicePairingScreen({
             }
 
             await logSystemActivity(userId, 'DISCONNECT_DEVICE', `Disconnected device ID: ${device.id}`);
-            
-            // Log notification entry for disconnection
+
             await createNotification(
-              'connection_event',
+              'device_registration',
               'Device Disconnected',
-              `Disconnected from ${device.device_name || 'SonoBand'}`,
-              'disconnected'
+              `Disconnected from ${device.device_name || 'SonoBand'}.`,
+              'OFF'
             );
 
             Alert.alert('Disconnected', 'Device disconnected successfully.');
@@ -208,7 +218,7 @@ export default function DevicePairingScreen({
             const resolvedIp = targetDevice?.ip_address || deviceIp;
 
             if (resolvedIp) {
-              await sendHardwareCommand(resolvedIp, 'stop');
+              await sendHardwareCommand(resolvedIp, 'disconnect');
             }
 
             const { error } = await supabase.from('user_devices').delete().eq('id', deviceId);
@@ -252,52 +262,53 @@ export default function DevicePairingScreen({
     setIsSubmitting(true);
     try {
       if (typeof setSyncState === 'function') setSyncState('SYNCING');
-      const uniqueMac = macAddressInput.trim() || `MANUAL_${Date.now()}`;
 
-      await sendHardwareCommand(resolvedIp, 'start');
+      // Test live hardware ping
+      const isHardwareAlive = await sendHardwareCommand(resolvedIp, 'ping');
+
+      const uniqueMac = macAddressInput.trim() || `MANUAL_${Date.now()}`;
+      const parsedUserId = parseInt(userId, 10);
+      const insertUserId = isNaN(parsedUserId) ? userId : parsedUserId;
 
       const { data, error } = await supabase
         .from('user_devices')
         .insert([
           {
-            user_id: userId,
+            user_id: insertUserId,
             device_name: deviceNameInput.trim(),
             mac_address: uniqueMac,
             ip_address: resolvedIp,
-            is_on: true,
-            last_seen: new Date().toISOString(),
+            is_on: false,
+            last_seen: isHardwareAlive ? new Date().toISOString() : new Date(0).toISOString(),
           },
         ])
         .select();
 
       if (error) throw error;
 
-      const registeredDevice =
-        data && data.length > 0
-          ? data[0]
-          : {
-              device_name: deviceNameInput.trim(),
-              ip_address: resolvedIp,
-              mac_address: uniqueMac,
-            };
+      if (isHardwareAlive) {
+        await sendHardwareCommand(resolvedIp, 'connect');
+        if (typeof setSyncState === 'function') setSyncState('SUCCESS');
+        if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
 
-      if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
+        const registeredDevice = data && data.length > 0 ? data[0] : null;
+        if (typeof onSelectDevice === 'function' && registeredDevice) {
+          onSelectDevice(registeredDevice);
+        }
 
-      // Log notification entry upon initial registration & pairing
-      await createNotification(
-        'connection_event',
-        'Device Registered',
-        `Registered and connected to ${deviceNameInput.trim()}`,
-        'connected'
-      );
-
-      if (typeof onSelectDevice === 'function') {
-        onSelectDevice(registeredDevice);
-      } else if (typeof setSyncState === 'function') {
-        setSyncState('SUCCESS');
+        Alert.alert('Device Saved & Connected', 'Device registered and reachable over the network!');
+      } else {
+        if (typeof setSyncState === 'function') setSyncState('IDLE');
+        Alert.alert('Saved (Offline)', 'Device details saved, but the device was not reachable on the network.');
       }
 
-      Alert.alert('Success', 'Device registered and connected!');
+      await createNotification(
+        'device_registration',
+        'New Device Registered',
+        `Your Sonoband device (${deviceNameInput.trim()}) has been registered.`,
+        'REGISTERED'
+      );
+
       setIsRegisterModalVisible(false);
       setDeviceNameInput('');
       setMacAddressInput('');
@@ -343,7 +354,7 @@ export default function DevicePairingScreen({
           />
           <View style={styles.statusTextContainer}>
             <Text style={styles.statusTitle}>
-              {syncState === 'SUCCESS' ? 'Device Connected' : 'No Active Connection'}
+              {syncState === 'SUCCESS' ? 'Device Paired & Connected' : 'No Active Connection'}
             </Text>
             <Text style={styles.statusSubtitle}>
               {`Active IP: ${deviceIp ? deviceIp : 'Not configured'}`}
@@ -383,7 +394,9 @@ export default function DevicePairingScreen({
                   <View style={styles.deviceInfo}>
                     <Text style={styles.deviceName}>{item.device_name}</Text>
                     <Text style={styles.deviceSubText}>
-                      {`IP: ${item.ip_address ? item.ip_address : 'Unconfigured'}`}
+                      {`IP: ${item.ip_address ? item.ip_address : 'Unconfigured'} | State: ${
+                        item.is_on ? 'Active' : 'Standby'
+                      }`}
                     </Text>
                   </View>
                 </TouchableOpacity>
@@ -454,7 +467,7 @@ export default function DevicePairingScreen({
                 {isSubmitting ? (
                   <ActivityIndicator color="#0F172A" size="small" />
                 ) : (
-                  <Text style={styles.saveButtonText}>Save & Connect</Text>
+                  <Text style={styles.saveButtonText}>Save & Pair</Text>
                 )}
               </TouchableOpacity>
             </View>

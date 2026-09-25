@@ -1,11 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   StyleSheet, 
   Text, 
   View, 
   ScrollView, 
   TouchableOpacity, 
-  Platform,
   StatusBar,
   Alert,
   Modal,
@@ -17,7 +16,6 @@ import { supabase } from '../services/supabaseClient';
 
 let hasDismissedProfileAlert = false;
 
-// Custom Modal for selecting between Alert Sound Notification & Notifications
 function NotificationSelectionModal({ visible, onClose, onSelectOption }) {
   return (
     <Modal visible={visible} animationType="fade" transparent={true} onRequestClose={onClose}>
@@ -116,9 +114,10 @@ function DashboardTutorialModal({ visible, onClose }) {
 
 export default function DashboardScreen({ 
   navigation, 
+  onNavigate,
   isDeviceOn: propIsDeviceOn, 
   setIsDeviceOn,
-  userId,
+  userId: propUserId,
   currentScreen 
 }) {
   const [userName, setUserName] = useState('User');
@@ -127,14 +126,15 @@ export default function DashboardScreen({
   const [showNotifMenu, setShowNotifMenu] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   
-  // Power state strictly tracks hardware connectivity and sync with DeviceControl
   const [devicePower, setDevicePower] = useState(false);
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
   const [deviceIp, setDeviceIp] = useState(null);
 
   const navigateTo = (screen, params = {}) => {
-    if (navigation && typeof navigation.navigate === 'function') {
-      navigation.navigate(screen, { userId, ...params });
+    if (typeof onNavigate === 'function') {
+      onNavigate(screen, params);
+    } else if (navigation && typeof navigation.navigate === 'function') {
+      navigation.navigate(screen, { userId: propUserId, ...params });
     }
   };
 
@@ -147,64 +147,92 @@ export default function DashboardScreen({
     navigateTo(destinationScreen);
   };
 
-  const checkProfileCompletion = async () => {
-    if (!userId) return;
+  // FIXED: Explicitly checks if the hardware responds AND if is_connected is true
+  const pingHardwareDirectly = async (ip) => {
+    if (!ip) return false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
     try {
-      const { data, error } = await supabase
+      const response = await fetch(`http://${ip}:5000/ping`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (response.ok) {
+        const data = await response.json();
+        // Return true ONLY if ESP32 state confirms is_connected is true
+        return Boolean(data && data.is_connected === true);
+      }
+      return false;
+    } catch {
+      clearTimeout(timeoutId);
+      return false;
+    }
+  };
+
+  const checkProfileCompletion = useCallback(async () => {
+    try {
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const activeUserId = propUserId || authUser?.id;
+
+      if (!activeUserId) return;
+
+      const authMeta = authUser?.user_metadata || {};
+      const authName = authMeta.full_name || authMeta.name || authUser?.email?.split('@')[0];
+      const authAvatar = authMeta.avatar_url || authMeta.picture || null;
+
+      const parsedUserId = parseInt(activeUserId, 10);
+      const queryUserId = isNaN(parsedUserId) ? activeUserId : parsedUserId;
+
+      const { data } = await supabase
         .from('users')
         .select('*')
-        .eq('id', userId)
+        .eq('id', queryUserId)
         .maybeSingle();
 
-      if (data && !error) {
-        const resolvedName = data.name || data.full_name || data.first_name || data.username;
-        const displayName = resolvedName ? String(resolvedName).split(' ')[0] : 'User';
-        setUserName(displayName);
-        
-        if (data.avatar_url && String(data.avatar_url).trim()) {
-          setAvatarUrl(data.avatar_url);
-        } else {
-          setAvatarUrl(null);
-        }
+      const resolvedName = data?.name || data?.full_name || data?.first_name || data?.username || authName;
+      const resolvedAvatar = data?.avatar_url || authAvatar;
 
-        const missingFields = [];
-        if (!resolvedName || !String(resolvedName).trim()) missingFields.push('• Full Name');
-        if (!data.phone_number || !String(data.phone_number).trim()) missingFields.push('• Phone Number');
-        if (!data.avatar_url || !String(data.avatar_url).trim()) missingFields.push('• Profile Photo');
-
-        if (missingFields.length > 0 && !hasDismissedProfileAlert) {
-          Alert.alert(
-            "Incomplete Profile Details",
-            `Please update your account details to keep your information up to date.\n\nMissing Information:\n${missingFields.join('\n')}`,
-            [
-              { text: "Later", style: "cancel", onPress: () => { hasDismissedProfileAlert = true; } },
-              { text: "Update Now", onPress: () => navigateTo('profile') }
-            ]
-          );
-        }
+      if (resolvedName) {
+        setUserName(String(resolvedName).trim().split(' ')[0]);
       }
 
-      // Fetch paired device and verify active heartbeat state
+      setAvatarUrl(resolvedAvatar && String(resolvedAvatar).trim() ? String(resolvedAvatar).trim() : null);
+
+      const missingFields = [];
+      if (!resolvedName || !String(resolvedName).trim()) missingFields.push('• Full Name');
+      if (!data?.phone_number || !String(data.phone_number).trim()) missingFields.push('• Phone Number');
+      if (!resolvedAvatar || !String(resolvedAvatar).trim()) missingFields.push('• Profile Photo');
+
+      if (missingFields.length > 0 && !hasDismissedProfileAlert) {
+        Alert.alert(
+          "Incomplete Profile Details",
+          `Please update your account details to keep your information up to date.\n\nMissing Information:\n${missingFields.join('\n')}`,
+          [
+            { text: "Later", style: "cancel", onPress: () => { hasDismissedProfileAlert = true; } },
+            { text: "Update Now", onPress: () => navigateTo('profile') }
+          ]
+        );
+      }
+
+      // Fetch paired device
       const { data: deviceData } = await supabase
         .from('user_devices')
         .select('id, mac_address, last_seen, is_on, ip_address')
-        .eq('user_id', String(userId).trim());
-      
+        .eq('user_id', queryUserId)
+        .order('last_seen', { ascending: false });
+
       if (deviceData && deviceData.length > 0) {
         const dev = deviceData[0];
-        
-        // Active check: is power on and last seen within 15 seconds?
-        const lastSeenMs = dev.last_seen ? new Date(dev.last_seen).getTime() : 0;
-        const isRecentlyActive = (Date.now() - lastSeenMs) < 15000;
-        const activeState = Boolean(dev.is_on && isRecentlyActive);
 
-        setIsConnected(activeState);
-        setDevicePower(Boolean(dev.is_on));
+        // FIXED: Verifies active hardware ping AND is_connected status
+        const isHardwareOnline = await pingHardwareDirectly(dev.ip_address);
+        const powerState = Boolean(dev.is_on && isHardwareOnline);
+
+        setIsConnected(isHardwareOnline);
+        setDevicePower(powerState);
         setCurrentDeviceId(dev.id);
         setDeviceIp(dev.ip_address);
 
         if (typeof setIsDeviceOn === 'function') {
-          setIsDeviceOn(Boolean(dev.is_on));
+          setIsDeviceOn(powerState);
         }
       } else {
         setIsConnected(false);
@@ -219,80 +247,38 @@ export default function DashboardScreen({
     } catch (err) {
       console.error("Error fetching profile details:", err);
     }
-  };
+  }, [propUserId, setIsDeviceOn]);
 
   useEffect(() => {
-    if (currentScreen === 'dashboard' || !currentScreen) {
-      checkProfileCompletion();
-    }
-  }, [userId, currentScreen]);
+    checkProfileCompletion();
+  }, [propUserId, currentScreen, checkProfileCompletion]);
 
-  // Kept intact for synchronization with DeviceControl settings page
-  const handleTogglePower = async () => {
-    if (!currentDeviceId && !userId) {
-      Alert.alert('No Device Paired', 'Please pair a device on the Device Pairing page before toggling power.');
-      return;
-    }
+  useEffect(() => {
+    if (!propUserId) return;
 
-    const newPowerState = !devicePower;
+    const parsedUserId = parseInt(propUserId, 10);
+    const queryUserId = isNaN(parsedUserId) ? propUserId : parsedUserId;
 
-    setDevicePower(newPowerState);
-    if (typeof setIsDeviceOn === 'function') setIsDeviceOn(newPowerState);
-
-    try {
-      let targetIp = deviceIp;
-      if (!targetIp) {
-        const { data: devFetch } = await supabase
-          .from('user_devices')
-          .select('ip_address')
-          .eq('user_id', String(userId).trim())
-          .maybeSingle();
-        targetIp = devFetch?.ip_address;
-        if (targetIp) setDeviceIp(targetIp);
-      }
-
-      if (targetIp) {
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-          await fetch(`http://${targetIp}/power?state=${newPowerState ? 'on' : 'off'}`, {
-            method: 'GET',
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-        } catch (networkErr) {
-          console.warn('Direct network request to device timed out:', networkErr);
+    const channel = supabase
+      .channel('schema-db-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'user_devices',
+          filter: `user_id=eq.${queryUserId}`,
+        },
+        () => {
+          checkProfileCompletion();
         }
-      }
+      )
+      .subscribe();
 
-      let query = supabase
-        .from('user_devices')
-        .update({ 
-          is_on: newPowerState,
-          last_seen: new Date().toISOString()
-        });
-
-      if (currentDeviceId) {
-        query = query.eq('id', currentDeviceId);
-      } else {
-        query = query.eq('user_id', String(userId).trim());
-      }
-
-      const { error } = await query;
-
-      if (error) {
-        console.error('Database Sync Error:', error);
-        setDevicePower(!newPowerState);
-        if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
-        Alert.alert('Sync Error', 'Could not update power state in database.');
-      }
-    } catch (err) {
-      console.error('Power toggle exception:', err);
-      setDevicePower(!newPowerState);
-      if (typeof setIsDeviceOn === 'function') setIsDeviceOn(!newPowerState);
-    }
-  };
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [propUserId, checkProfileCompletion]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -316,7 +302,6 @@ export default function DashboardScreen({
             </View>
           </TouchableOpacity>
 
-          {/* Notification Bell Button */}
           <TouchableOpacity style={styles.notifBell} onPress={handleNotificationPress} activeOpacity={0.7}>
             <Ionicons name="notifications-outline" size={22} color="#38BDF8" />
             <View style={styles.redBadge} />
@@ -327,7 +312,7 @@ export default function DashboardScreen({
 
         {/* BENTO GRID AREA */}
         <View style={styles.bentoRow}>
-          {/* REPLACED BATTERY CARD -> DEVICE POWER STATUS CARD (NON-CLICKABLE) */}
+          {/* DEVICE POWER STATUS CARD */}
           <View style={[styles.bentoCard, styles.smallCard]}>
             <Ionicons 
               name={devicePower ? "power" : "power-outline"} 
@@ -339,7 +324,7 @@ export default function DashboardScreen({
             </Text>
             <Text style={styles.cardLabel}>Device Power</Text>
             <Text style={[styles.batteryStatusText, { color: devicePower ? '#22C55E' : '#64748B' }]}>
-              {devicePower ? 'ACTIVE' : 'INACTIVE'}
+              {devicePower ? 'ACTIVE' : 'STANDBY'}
             </Text>
           </View>
 
@@ -358,7 +343,7 @@ export default function DashboardScreen({
             </Text>
             <Text style={styles.cardTitle}>Find & Pair Device</Text>
             <Text style={styles.cardSubtext}>
-              {isConnected ? 'Device online & listening' : 'No active connection'}
+              {isConnected ? (devicePower ? 'Device online & listening' : 'Device paired (Standby)') : 'No active connection'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -375,7 +360,7 @@ export default function DashboardScreen({
           <Text style={styles.cardSubtext}>Adjust vibration intensity & sound threshold</Text>
         </TouchableOpacity>
 
-        {/* REPLACED POWER TOGGLE BAR -> GROUP MANAGEMENT CARD */}
+        {/* GROUP MANAGEMENT CARD */}
         <TouchableOpacity 
           style={[styles.bentoCard, styles.fullWidthCard, { backgroundColor: '#1E293B', borderColor: '#334155' }]}
           onPress={() => navigateTo('groupManagement')}
@@ -391,7 +376,6 @@ export default function DashboardScreen({
           <Text style={styles.cardSubtext}>Manage family emergency sync & connected contacts</Text>
         </TouchableOpacity>
 
-        {/* GUIDES & MANUALS - SIDE-BY-SIDE BOX SHAPES */}
         <Text style={[styles.mainTitle, { marginTop: 25 }]}>App Guides & Manuals</Text>
 
         <View style={styles.bentoRow}>
@@ -416,7 +400,7 @@ export default function DashboardScreen({
 
       </ScrollView>
 
-      {/* 4 MAIN BOTTOM NAVIGATION BUTTONS */}
+      {/* BOTTOM NAV */}
       <View style={styles.bottomNav}>
         <TouchableOpacity style={styles.navItem} onPress={() => navigateTo('dashboard')}>
           <Feather name="home" size={22} color="#38BDF8" />
@@ -477,7 +461,6 @@ const styles = StyleSheet.create({
   cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardActionText: { fontSize: 11, fontWeight: 'bold', color: '#38BDF8' },
   
-  // Bottom Navigation Bar Styles
   bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: '#1E293B', flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#334155', paddingHorizontal: 8 },
   navItem: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 6 },
   navText: { fontSize: 11, fontWeight: '600', color: '#94A3B8', marginTop: 3, textAlign: 'center' },

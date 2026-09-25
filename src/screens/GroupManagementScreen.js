@@ -18,7 +18,7 @@ import { supabase, logSystemActivity } from '../services/supabaseClient';
 export default function GroupManagementScreen({ navigation, onNavigate, userId, userRole: initialUserRole, currentScreen }) {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [userRole, setUserRole] = useState(initialUserRole ? String(initialUserRole).trim().toLowerCase() : null); // 'patient', 'user', or 'caregiver'
+  const [userRole, setUserRole] = useState(initialUserRole ? String(initialUserRole).trim().toLowerCase() : null);
   
   // Modals
   const [isCreateModalVisible, setIsCreateModalVisible] = useState(false);
@@ -37,18 +37,22 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
     }
   }, [userId, currentScreen]);
 
+  // Helper to query user by integer PK or UUID FK safely
+  const getUserQuery = (targetId) => {
+    const isNum = !isNaN(targetId) && !isNaN(parseFloat(targetId));
+    return isNum 
+      ? supabase.from('users').select('role, name').eq('id', targetId)
+      : supabase.from('users').select('role, name').eq('uuid', targetId);
+  };
+
   const fetchUserRoleAndGroups = async () => {
     if (!userId) return;
     setLoading(true);
     try {
-      // 1. Fetch User Role if not passed via props
-      let detectedRole = initialUserRole ? String(initialUserRole).trim().toLowerCase() : 'patient';
+      let detectedRole = initialUserRole ? String(initialUserRole).trim().toLowerCase() : 'user';
 
-      const { data: userData, error: userError } = await supabase
-        .from('users')
-        .select('role')
-        .or(`id.eq.${userId},user_id.eq.${userId}`)
-        .maybeSingle();
+      // Fetch role based on integer ID or UUID safely
+      const { data: userData, error: userError } = await getUserQuery(userId).maybeSingle();
 
       if (!userError && userData?.role) {
         detectedRole = String(userData.role).trim().toLowerCase();
@@ -60,8 +64,6 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
       }
 
       setUserRole(detectedRole);
-
-      // 2. Fetch User Groups
       await fetchUserGroups();
     } catch (err) {
       console.error("Error initializing group management:", err.message);
@@ -109,7 +111,7 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
   };
 
   const isCaregiver = userRole === 'caregiver';
-  const isPatientOrUser = userRole === 'patient' || userRole === 'user' || !userRole;
+  const isPatientOrUser = userRole === 'user' || userRole === 'patient' || !userRole;
 
   // --- CREATE GROUP ---
   const handleCreateGroup = async () => {
@@ -141,7 +143,6 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
 
       if (memberError) throw memberError;
 
-      // Audit Log Entry
       if (logSystemActivity) {
         try {
           await logSystemActivity(userId, 'create_group', `Created group: ${newGroupName.trim()}`, { groupId: newGroup.id });
@@ -202,13 +203,52 @@ export default function GroupManagementScreen({ navigation, onNavigate, userId, 
         return;
       }
 
+      // 1. Add caregiver to group_members
       const { error: joinError } = await supabase
         .from('group_members')
         .insert([{ group_id: group.id, user_id: userId, role: 'caregiver' }]);
 
       if (joinError) throw joinError;
 
-      // Audit Log Entry
+      // 2. Safely get caregiver name using 'name' column from users schema
+      let joiningUserName = 'A new member';
+      try {
+        const { data: userData } = await getUserQuery(userId).maybeSingle();
+
+        if (userData?.name) {
+          joiningUserName = userData.name;
+        }
+      } catch (nameErr) {
+        console.log("Name retrieval skipped:", nameErr.message);
+      }
+
+      // 3. Send notifications to existing group members
+      try {
+        const { data: existingMembers } = await supabase
+          .from('group_members')
+          .select('user_id')
+          .eq('group_id', group.id);
+
+        if (existingMembers && existingMembers.length > 0) {
+          const notificationsToInsert = existingMembers
+            .filter((m) => String(m.user_id) !== String(userId))
+            .map((m) => ({
+              user_id: m.user_id,
+              notification_type: 'group_update',
+              title: 'New Group Member',
+              message: `${joiningUserName} joined "${group.group_name}".`,
+              metadata: 'JOINED',
+              created_at: new Date().toISOString(),
+            }));
+
+          if (notificationsToInsert.length > 0) {
+            await supabase.from('notifications').insert(notificationsToInsert);
+          }
+        }
+      } catch (notifErr) {
+        console.error("Error creating group join notification:", notifErr.message);
+      }
+
       if (logSystemActivity) {
         try {
           await logSystemActivity(userId, 'join_group', `Joined group: ${group.group_name}`, { groupId: group.id });

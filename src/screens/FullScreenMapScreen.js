@@ -1,21 +1,83 @@
-import React, { useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   TouchableOpacity,
-  Alert
+  Alert,
+  ActivityIndicator
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
+import * as Location from 'expo-location'; // 1. IMPORT EXPO LOCATION
 import Header from '../components/Header';
+import { supabase } from '../services/supabaseClient';
 
 export default function FullscreenMapScreen({ navigation }) {
   const webViewRef = useRef(null);
-  const latitude = 14.5995;
-  const longitude = 120.9842;
+  const [coords, setCoords] = useState({ latitude: 14.5995, longitude: 120.9842 });
+  const [userName, setUserName] = useState('User Location');
+  const [loading, setLoading] = useState(true);
 
-  // Bright / Standard OpenStreetMap Tiles
+  // 2. RUN ON SCREEN LOAD
+  useEffect(() => {
+    fetchUserAndLocation();
+  }, []);
+
+  const fetchUserAndLocation = async () => {
+    try {
+      setLoading(true);
+
+      // A. Get current user's profile name from Supabase
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('full_name')
+          .eq('id', user.id)
+          .single();
+        
+        if (profile?.full_name) {
+          setUserName(profile.full_name);
+        }
+      }
+
+      // B. Request Phone Location Permission
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Location permission is required to view your live GPS position.');
+        setLoading(false);
+        return;
+      }
+
+      // C. Get Phone GPS Position
+      const currentLocation = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = currentLocation.coords;
+      setCoords({ latitude, longitude });
+
+      // D. Sync position to Supabase database
+      if (user) {
+        await supabase
+          .from('user_locations')
+          .upsert({
+            user_id: user.id,
+            latitude,
+            longitude,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'user_id' });
+      }
+
+    } catch (error) {
+      console.error('Error fetching location:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 3. MAP HTML WITH USER NAME POPUP
   const mapHtml = `
     <!DOCTYPE html>
     <html>
@@ -30,19 +92,18 @@ export default function FullscreenMapScreen({ navigation }) {
       <body>
         <div id="map"></div>
         <script>
-          var map = L.map('map', { zoomControl: false }).setView([${latitude}, ${longitude}], 15);
+          var map = L.map('map', { zoomControl: false }).setView([${coords.latitude}, ${coords.longitude}], 15);
           
-          // Standard OpenStreetMap (White/Light Mode Tiles)
           L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '© OpenStreetMap'
           }).addTo(map);
 
-          var marker = L.marker([${latitude}, ${longitude}]).addTo(map);
-          marker.bindPopup("<b>Sonoband Hardware</b><br>Live GPS Location").openPopup();
+          var marker = L.marker([${coords.latitude}, ${coords.longitude}]).addTo(map);
+          marker.bindPopup("<b>👤 ${userName}</b><br>Live GPS Location").openPopup();
 
           function centerMap() {
-            map.flyTo([${latitude}, ${longitude}], 16);
+            map.flyTo([${coords.latitude}, ${coords.longitude}], 16);
           }
         </script>
       </body>
@@ -54,41 +115,44 @@ export default function FullscreenMapScreen({ navigation }) {
       <Header title="Fullscreen GPS Tracking" showBack={true} navigation={navigation} />
 
       <View style={styles.mapWrapper}>
-        <WebView
-          ref={webViewRef}
-          originWhitelist={['*']}
-          source={{ html: mapHtml }}
-          style={styles.webView}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-        />
+        {loading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#38BDF8" />
+            <Text style={{ color: '#94A3B8', marginTop: 10 }}>Fetching GPS location...</Text>
+          </View>
+        ) : (
+          <WebView
+            ref={webViewRef}
+            originWhitelist={['*']}
+            source={{ html: mapHtml }}
+            style={styles.webView}
+            javaScriptEnabled={true}
+            domStorageEnabled={true}
+          />
+        )}
 
-        {/* OVERLAY BADGE (Glassmorphism Dark Floating Card) */}
+        {/* OVERLAY BADGE */}
         <View style={styles.floatingBadge}>
           <View style={styles.badgeIconBox}>
             <Text style={{ fontSize: 16 }}>📍</Text>
           </View>
           <View style={{ marginLeft: 10, flex: 1 }}>
-            <Text style={styles.pinText}>Sonoband Wearable</Text>
-            <Text style={styles.coords}>{latitude}° N, {longitude}° E</Text>
+            <Text style={styles.pinText}>{userName}</Text>
+            <Text style={styles.coords}>{coords.latitude.toFixed(4)}° N, {coords.longitude.toFixed(4)}° E</Text>
           </View>
           <View style={styles.statusDot} />
         </View>
 
-        {/* FLOATING ACTION BUTTONS */}
+        {/* FLOATING BUTTONS */}
         <View style={styles.controlsBar}>
           <TouchableOpacity 
             style={[styles.actionBtn, styles.primaryBtn]}
-            onPress={() => webViewRef.current?.injectJavaScript('centerMap(); true;')}
+            onPress={() => {
+              fetchUserAndLocation();
+              webViewRef.current?.injectJavaScript('centerMap(); true;');
+            }}
           >
-            <Text style={styles.btnText}>🎯 Center Device</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={[styles.actionBtn, styles.accentBtn]}
-            onPress={() => Alert.alert('📡 Location Shared', 'Coordinates sent to family group!')}
-          >
-            <Text style={[styles.btnText, { color: '#0F172A' }]}>📡 Share Pin</Text>
+            <Text style={styles.btnText}>🎯 Recenter My Location</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -97,17 +161,10 @@ export default function FullscreenMapScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: '#0F172A' 
-  },
-  mapWrapper: {
-    flex: 1,
-    position: 'relative'
-  },
-  webView: {
-    flex: 1
-  },
+  container: { flex: 1, backgroundColor: '#0F172A' },
+  mapWrapper: { flex: 1, position: 'relative' },
+  webView: { flex: 1 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   floatingBadge: {
     position: 'absolute',
     top: 15,
@@ -115,17 +172,13 @@ const styles = StyleSheet.create({
     right: 15,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(30, 41, 59, 0.92)', // Dark Slate Overlay
+    backgroundColor: 'rgba(30, 41, 59, 0.92)',
     paddingHorizontal: 15,
     paddingVertical: 12,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: '#334155',
     elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4
   },
   badgeIconBox: {
     width: 36,
@@ -150,15 +203,9 @@ const styles = StyleSheet.create({
     flex: 1, 
     paddingVertical: 14, 
     borderRadius: 14, 
-    marginHorizontal: 5, 
     alignItems: 'center',
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3
+    elevation: 4
   },
   primaryBtn: { backgroundColor: '#38BDF8' },
-  accentBtn: { backgroundColor: '#FACC15' },
   btnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 13 }
 });
