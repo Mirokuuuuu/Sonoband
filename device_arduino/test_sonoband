@@ -9,9 +9,6 @@
 #include <driver/i2s.h>      // Native I2S Driver for INMP441 Mics
 #include "icons.h"  
 
-// ================= EDGE IMPULSE TINYML HEADER =================
-#include <Johntadipa-project-1_inferencing.h>
-
 // ================= COLOR DEFINITIONS (ST7735 16-bit 565) =================
 #define COLOR_PURE_RED   0x001F  // Renders Vibrant RED on ST7735
 #define COLOR_PURE_BLUE  0xF800  // Renders Vibrant BLUE on ST7735
@@ -19,7 +16,7 @@
 
 // ================= USER WI-FI SETTINGS =================
 const char* ssid     = "Connect ka? Wag na!";     
-const char* password = "136722100143123";      
+const char* password = "136722100143123";          
 
 // ================= NETWORK & UDP / HTTP SETTINGS =================
 IPAddress appIP;                                
@@ -30,7 +27,8 @@ WiFiUDP udp;
 WebServer httpServer(5000); 
 
 unsigned long lastAnnounce = 0;
-const unsigned long ANNOUNCE_INTERVAL = 3000;
+const unsigned long ANNOUNCE_INTERVAL = 3000; // Heartbeat sent every 3s
+unsigned long lastWifiCheck = 0;
 
 // ================= PIN DEFINITIONS =================
 #define TFT_CS   5
@@ -54,41 +52,38 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 int32_t i2sRawBuffer[I2S_BUFFER_LEN];
 
-// Audio collection buffer: 8000 PCM samples = 0.5s window at 16 kHz
-#define AUDIO_ACCUM_SIZE 8000
+// Audio chunking for ML classification
+#define AUDIO_ACCUM_SIZE 4096
 int16_t monoSendBuffer[AUDIO_ACCUM_SIZE];
 int accumIndex = 0;
 
 // ================= STATE VARIABLES =================
-bool deviceOn = false;               
-bool isConnectedToApp = false; 
+bool deviceOn = true;            
+bool isConnectedToApp = false; // Starts false until app/wifi syncs
 
 unsigned long lastHeartbeat = 0;   
+const unsigned long HEARTBEAT_TIMEOUT = 45000; 
 
-int noiseFloor = 2500;             // Dynamic mic threshold (Default Narrow: 2500, Broad: 500)
+int noiseFloor = 1200;            
 String currentLoggedInUser = "21"; // Default fallback user ID
-int vibrationPwmValue = 190;       // Dynamic vibration strength (Default Medium: 190)
+int vibrationPwmValue = 165;     
 
 String activeSoundType = "Listening..."; 
 String currentDisplayLabel = "Ready to Detect";
 char currentDirectionChar = 'N'; 
 
 unsigned long lastAlertTime = 0;
-unsigned long alertCooldown = 2000; 
+const unsigned long alertCooldown = 2000; 
 unsigned long displayResetTime = 0;
 unsigned long vibOffTime = 0;
 bool isVibrating = false;
-
-// Connect Screen Transition Variables
-unsigned long connectDisplayTime = 0;
-bool showingConnectScreen = false;
-const unsigned long CONNECT_DISPLAY_DURATION = 2000; 
 
 String lastRenderedLabel = "";
 char lastRenderedDir = '\0';
 
 // Helper to get subnet broadcast address
 IPAddress getBroadcastIP() {
+  if (WiFi.status() != WL_CONNECTED) return IPAddress(255, 255, 255, 255);
   IPAddress localIP = WiFi.localIP();
   IPAddress netMask = WiFi.subnetMask();
   IPAddress broadcast;
@@ -98,95 +93,12 @@ IPAddress getBroadcastIP() {
   return broadcast;
 }
 
-// Helper to determine vibration duration (in ms) based on sound category/class
-unsigned long getVibrationDurationForSound(String label, String priorityClass = "") {
-  String lowerLabel = label;
-  lowerLabel.toLowerCase();
-  String lowerClass = priorityClass;
-  lowerClass.toLowerCase();
-
-  // Critical Priority (3 Seconds Vibration)
-  if (lowerClass == "critical" || lowerLabel.indexOf("fire") >= 0 || lowerLabel.indexOf("alarm") >= 0 || lowerLabel.indexOf("siren") >= 0) {
-    return 3000;
+// Non-blocking WiFi reconnect trigger
+void checkWifiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Wi-Fi] Disconnected / Searching for network...");
+    WiFi.reconnect();
   }
-  // High Priority (2 Seconds Vibration)
-  else if (lowerClass == "high" || lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0 || lowerLabel.indexOf("car") >= 0 || lowerLabel.indexOf("horn") >= 0) {
-    return 2000;
-  }
-  // Medium / Low Priority (1 Second Vibration)
-  else {
-    return 1000;
-  }
-}
-
-// ================= EDGE IMPULSE CALLBACK & INFERENCE =================
-// [FIX A APPLIED]: Gain multiplier (3.5x) to amplify quiet INMP441 audio
-int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
-  float gain = 3.5f; 
-  for (size_t i = 0; i < length; i++) {
-    float sample = ((float)monoSendBuffer[offset + i] / 32768.0f) * gain;
-    
-    // Clamp output within float bounds [-1.0, 1.0] to prevent audio clipping distortion
-    if (sample > 1.0f) sample = 1.0f;
-    if (sample < -1.0f) sample = -1.0f;
-    
-    out_ptr[i] = sample;
-  }
-  return 0;
-}
-
-String classifyAudioBufferOnDevice(String &outPriorityClass) {
-  signal_t signal;
-  signal.total_length = AUDIO_ACCUM_SIZE;
-  signal.get_data = &raw_feature_get_data;
-
-  ei_impulse_result_t result = { 0 };
-  EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
-
-  if (r != EI_IMPULSE_OK) {
-    Serial.printf("[TINYML] Inference failed (Error code: %d)\n", r);
-    return "";
-  }
-
-  // Find predicted sound class with highest confidence score
-  float maxConfidence = 0.0f;
-  int topClassIdx = -1;
-
-  Serial.println("\n--- [TINYML INFERENCE SCORES] ---");
-  for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-    Serial.printf("  %s: %.2f%%\n", result.classification[ix].label, result.classification[ix].value * 100.0f);
-    if (result.classification[ix].value > maxConfidence) {
-      maxConfidence = result.classification[ix].value;
-      topClassIdx = ix;
-    }
-  }
-
-  // [FIX B APPLIED]: Adjusted threshold to 0.50f (50% confidence)
-  if (topClassIdx >= 0 && maxConfidence >= 0.50f) {
-    String detectedLabel = String(result.classification[topClassIdx].label);
-    
-    // Ignore ambient/background/noise labels if present in dataset
-    if (detectedLabel != "noise" && detectedLabel != "background" && detectedLabel != "z_noise" && detectedLabel != "unknown") {
-      Serial.printf("[TINYML] Verified Sound: %s (Confidence: %.2f%%)\n", 
-                    detectedLabel.c_str(), maxConfidence * 100.0f);
-
-      String lower = detectedLabel;
-      lower.toLowerCase();
-
-      if (lower.indexOf("fire") >= 0 || lower.indexOf("alarm") >= 0 || lower.indexOf("siren") >= 0) {
-        outPriorityClass = "critical";
-      } else if (lower.indexOf("baby") >= 0 || lower.indexOf("cry") >= 0 || lower.indexOf("car") >= 0 || lower.indexOf("horn") >= 0) {
-        outPriorityClass = "high";
-      } else {
-        outPriorityClass = "medium";
-      }
-
-      return detectedLabel;
-    }
-  }
-
-  Serial.printf("[TINYML] Below confidence threshold (Highest: %.2f%%)\n", maxConfidence * 100.0f);
-  return "";
 }
 
 // ================= FUNCTION PROTOTYPES =================
@@ -194,10 +106,8 @@ void setupI2S();
 void setupHttpEndpoints();
 void updateFullDisplay(String label, char dir);
 void drawWelcomeScreen();
-void drawWaitingScreen(String msg);
-void drawWaitingForAppScreen();
-void drawStandbyScreen();
 void drawOffScreen();
+void sendWifiAlert(String direction, long amplitude, int16_t* rawBuffer, int bufferLength);
 void sendHandshakeResponse();
 void triggerVibration(int pwm, unsigned long durationMs = 200);
 void updateVibration();
@@ -205,46 +115,40 @@ void applyCORS();
 
 void setup() {
   Serial.begin(115200);
-  delay(1000); 
-  Serial.println("\n=== SONOBAND ESP32 INITIALIZING (EDGE AI ENABLED) ===");
+  delay(500); 
+  Serial.println("\n=== SONOBAND ESP32 INITIALIZING ===");
 
   pinMode(VIB_MOTOR_PIN, OUTPUT);
   analogWrite(VIB_MOTOR_PIN, 0);
 
-  // Initialize Screen
+  // 1. Initialize Screen
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
   tft.initR(INITR_MINI160x80); 
   tft.invertDisplay(false); 
   tft.setRotation(1);          
 
   drawWelcomeScreen();
-  delay(1500);
+  delay(1000);
 
-  // Initialize Dual-Mic I2S Hardware Driver
+  // 2. Initialize Dual-Mic I2S Hardware Driver (Sound detection starts HERE)
   setupI2S();
 
-  drawWaitingScreen("Connecting WiFi...");
+  // 3. Start Wi-Fi asynchronously in background (Non-blocking)
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false); 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\n[Wi-Fi] Connected!");
-  Serial.print("[Wi-Fi] IP Address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("[Wi-Fi] Non-blocking connection initiated...");
 
   udp.begin(udpPort);
-  
   setupHttpEndpoints();
   httpServer.begin();
-  Serial.println("[HTTP] Command server ready on port 5000.");
 
   lastHeartbeat = millis(); 
+  deviceOn = true;
 
-  deviceOn = false;
-  isConnectedToApp = false;
-  drawWaitingForAppScreen();
+  // Jump straight to detection readiness
+  updateFullDisplay("Ready to Detect", 'N');
 }
 
 void setupI2S() {
@@ -255,8 +159,8 @@ void setupI2S() {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 512,
+    .dma_buf_count = 4,
+    .dma_buf_len = 256,
     .use_apll = false,
     .tx_desc_auto_clear = false,
     .fixed_mclk = 0
@@ -299,29 +203,21 @@ void setupHttpEndpoints() {
     appIP = httpServer.client().remoteIP();
     appIPKnown = true;
     isConnectedToApp = true; 
-
-    deviceOn = false; 
+    deviceOn = true; 
     lastHeartbeat = millis();
 
-    drawStandbyScreen(); 
-    triggerVibration(vibrationPwmValue, 200);
-
-    connectDisplayTime = millis();
-    showingConnectScreen = true;
+    updateFullDisplay("Ready to Detect", 'N'); 
+    triggerVibration(100, 200);
 
     applyCORS();
-    httpServer.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Connected & Paired\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
+    httpServer.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Connected & Active\",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
   });
 
   httpServer.on("/disconnect", HTTP_POST, []() {
-    deviceOn = false;
-    isConnectedToApp = false;
     appIPKnown = false;
-    showingConnectScreen = false;
-    
-    drawWaitingForAppScreen(); 
+    isConnectedToApp = false;
     applyCORS();
-    httpServer.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Disconnected\"}");
+    httpServer.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Disconnected from app\"}");
   });
 
   httpServer.on("/config", HTTP_POST, []() {
@@ -334,7 +230,7 @@ void setupHttpEndpoints() {
       #if ARDUINOJSON_VERSION_MAJOR >= 7
         JsonDocument doc;
       #else
-        DynamicJsonDocument doc(3072);
+        DynamicJsonDocument doc(2048);
       #endif
       DeserializationError err = deserializeJson(doc, body);
       if (!err) {
@@ -354,8 +250,6 @@ void setupHttpEndpoints() {
           deviceOn = (pwr == "on" || pwr == "true");
         }
 
-        showingConnectScreen = false; 
-
         if (!deviceOn) {
           drawOffScreen(); 
         } else {
@@ -364,26 +258,15 @@ void setupHttpEndpoints() {
           updateFullDisplay(currentDisplayLabel, 'N'); 
         }
 
-        // --- VIBRATION SENSITIVITY MAPPING ---
         if (doc.containsKey("vibration_intensity")) {
           String vib = doc["vibration_intensity"].as<String>();
-          if (vib == "low") {
-            vibrationPwmValue = 120;
-          } else if (vib == "medium") {
-            vibrationPwmValue = 190;
-          } else { 
-            vibrationPwmValue = 255;
-          }
+          if (vib == "low") vibrationPwmValue = 80;
+          else if (vib == "high") vibrationPwmValue = 255;
+          else vibrationPwmValue = 165;
         }
-
-        // --- MICROPHONE SENSITIVITY MAPPING ---
         if (doc.containsKey("sensitivity") || doc.containsKey("sound_threshold")) {
           String sens = doc.containsKey("sensitivity") ? doc["sensitivity"].as<String>() : doc["sound_threshold"].as<String>();
-          if (sens == "broad" || sens == "wide") {
-            noiseFloor = 500;   // Broad listening: low peak threshold
-          } else { 
-            noiseFloor = 2500;  // Narrow listening: high peak threshold
-          }
+          noiseFloor = (sens == "broad" || sens == "wide") ? 800 : 1500;
         }
       }
     }
@@ -394,24 +277,66 @@ void setupHttpEndpoints() {
 
 // ================= MAIN LOOP =================
 void loop() {
-  httpServer.handleClient();
+  // Non-blocking WiFi reconnect check every 10 seconds
+  if (millis() - lastWifiCheck > 10000) {
+    checkWifiConnection();
+    lastWifiCheck = millis();
+  }
+
+  // Handle server clients safely if connected
+  if (WiFi.status() == WL_CONNECTED) {
+    httpServer.handleClient();
+  }
+  
   updateVibration();
 
-  if (showingConnectScreen && (millis() - connectDisplayTime >= CONNECT_DISPLAY_DURATION)) {
-    showingConnectScreen = false;
-    if (!deviceOn) {
-      drawOffScreen();
+  // 1. LISTEN FOR CLASSIFICATION RESPONSES VIA UDP (If connected)
+  if (WiFi.status() == WL_CONNECTED) {
+    int packetSize = udp.parsePacket();
+    if (packetSize > 0) {
+      char incoming[512];
+      int len = udp.read(incoming, 511);
+      if (len > 0) incoming[len] = 0;
+
+      #if ARDUINOJSON_VERSION_MAJOR >= 7
+        JsonDocument doc;
+      #else
+        DynamicJsonDocument doc(512);
+      #endif
+      DeserializationError error = deserializeJson(doc, incoming);
+
+      if (!error) {
+        lastHeartbeat = millis();
+
+        if (doc.containsKey("detected_sound") && deviceOn) {
+          String label = doc["detected_sound"].as<String>();
+          
+          if (doc.containsKey("direction")) {
+            String dirStr = doc["direction"].as<String>();
+            if (dirStr == "left") currentDirectionChar = 'L';
+            else if (dirStr == "right") currentDirectionChar = 'R';
+          }
+
+          if (label != "none" && label != "unknown" && label != "Standby") {
+            activeSoundType = label;
+            currentDisplayLabel = label;
+            updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+            displayResetTime = millis();
+            triggerVibration(vibrationPwmValue, 300);
+          }
+        }
+      }
     }
   }
 
-  // Periodic Pong
+  // 2. Periodic Handshake Pong (If connected)
   if (millis() - lastAnnounce > ANNOUNCE_INTERVAL) {
     sendHandshakeResponse();
     lastAnnounce = millis();
   }
 
-  // ON-DEVICE SOUND DETECTION & CLASSIFICATION
-  if (deviceOn) {
+  // 3. STEREO I2S SAMPLING & SOUND ALERT DISPATCH
+  if (deviceOn) { 
     if (currentDisplayLabel != "Ready to Detect" && (millis() - displayResetTime > alertCooldown)) {
       currentDisplayLabel = "Ready to Detect";
       currentDirectionChar = 'N'; 
@@ -422,6 +347,7 @@ void loop() {
     if (millis() - lastAlertTime < alertCooldown) return; 
 
     size_t bytesRead = 0;
+    // Reads I2S audio without blocking the hardware loop
     i2s_read(I2S_PORT, &i2sRawBuffer, sizeof(i2sRawBuffer), &bytesRead, portMAX_DELAY);
 
     int samplesRead = bytesRead / 4;
@@ -429,8 +355,8 @@ void loop() {
     long peakAmpRight = 0;
 
     for (int i = 0; i < samplesRead; i += 2) {
-      int16_t leftSample  = (int16_t)(i2sRawBuffer[i] >> 16);
-      int16_t rightSample = (int16_t)(i2sRawBuffer[i + 1] >> 16);
+      int32_t leftSample = (i2sRawBuffer[i] >> 14);
+      int32_t rightSample = (i2sRawBuffer[i + 1] >> 14);
 
       long absLeft = abs(leftSample);
       long absRight = abs(rightSample);
@@ -445,45 +371,36 @@ void loop() {
 
     long maxPeak = max(peakAmpLeft, peakAmpRight);
 
+    // Sound detected above threshold - IMMEDIATE local alert trigger
     if (maxPeak >= noiseFloor && accumIndex >= AUDIO_ACCUM_SIZE) {
-      char winnerDir = (peakAmpRight > peakAmpLeft) ? 'R' : 'L';
+      String winningDirection = (peakAmpRight > peakAmpLeft) ? "right" : "left";
+      char newDirectionChar = (peakAmpRight > peakAmpLeft) ? 'R' : 'L';
 
-      currentDisplayLabel = "Analyzing...";
-      currentDirectionChar = winnerDir;
+      currentDisplayLabel = "Loud Sound!";
+      currentDirectionChar = newDirectionChar;
+      
+      // Update screen immediately
       updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+      
+      // Trigger motor feedback immediately
+      triggerVibration(vibrationPwmValue, 250);
 
-      // --- EXECUTE LOCAL TINYML INFERENCE ---
-      String detectedPriorityClass = "";
-      String detectedSound = classifyAudioBufferOnDevice(detectedPriorityClass);
+      displayResetTime = millis();
+      lastAlertTime = millis(); 
 
-      if (detectedSound.length() > 0) {
-        activeSoundType = detectedSound;
-        currentDisplayLabel = detectedSound;
-        currentDirectionChar = winnerDir;
-        updateFullDisplay(currentDisplayLabel, currentDirectionChar);
-
-        unsigned long vibDuration = getVibrationDurationForSound(detectedSound, detectedPriorityClass);
-        alertCooldown = vibDuration;
-        displayResetTime = millis();
-        lastAlertTime = millis();
-
-        triggerVibration(vibrationPwmValue, vibDuration);
-      } else {
-        currentDisplayLabel = "Ready to Detect";
-        currentDirectionChar = 'N';
-        updateFullDisplay(currentDisplayLabel, currentDirectionChar);
-      }
-
+      // Send network alert ONLY if Wi-Fi is available (Non-blocking)
+      sendWifiAlert(winningDirection, maxPeak, monoSendBuffer, AUDIO_ACCUM_SIZE);
+      
       accumIndex = 0; 
     } else if (accumIndex >= AUDIO_ACCUM_SIZE) {
       accumIndex = 0; 
     }
-  } else if (!showingConnectScreen && isConnectedToApp) {
+  } else {
     drawOffScreen();
   }
 }
 
-// ================= NETWORK & DISPLAY HELPERS =================
+// ================= NETWORK HELPERS =================
 void sendHandshakeResponse() {
   if (WiFi.status() == WL_CONNECTED) {
     IPAddress target = appIPKnown ? appIP : getBroadcastIP();
@@ -497,6 +414,31 @@ void sendHandshakeResponse() {
   }
 }
 
+void sendWifiAlert(String direction, long amplitude, int16_t* rawBuffer, int bufferLength) {
+  if (WiFi.status() == WL_CONNECTED && deviceOn) {
+    IPAddress target = appIPKnown ? appIP : getBroadcastIP();
+    
+    #if ARDUINOJSON_VERSION_MAJOR >= 7
+      JsonDocument doc;
+    #else
+      DynamicJsonDocument doc(512);
+    #endif
+
+    doc["type"] = "alert";
+    doc["user_id"] = currentLoggedInUser;
+    doc["mac_address"] = WiFi.macAddress();
+    doc["ip_address"] = WiFi.localIP().toString();
+    doc["direction"] = direction;
+    doc["amplitude"] = amplitude;
+    doc["sound_type"] = "Loud Sound"; 
+
+    udp.beginPacket(target, udpPort);
+    serializeJson(doc, udp);
+    udp.endPacket();
+  }
+}
+
+// ================= HARDWARE CONTROLS & DISPLAY =================
 void triggerVibration(int pwm, unsigned long durationMs) {
   analogWrite(VIB_MOTOR_PIN, pwm);
   vibOffTime = millis() + durationMs;
@@ -520,58 +462,6 @@ void drawWelcomeScreen() {
   tft.setTextColor(ST7735_WHITE);
   tft.print("SonoBand");
   lastRenderedLabel = "";
-  lastRenderedDir = '\0';
-}
-
-void drawWaitingScreen(String msg) {
-  tft.fillScreen(ST7735_BLACK);
-  tft.setTextColor(ST7735_CYAN);
-  tft.setTextSize(1);
-  tft.setCursor(10, 20);
-  tft.print("SonoBand Status:");
-  tft.setCursor(10, 45);
-  tft.setTextColor(ST7735_WHITE);
-  tft.print(msg);
-  lastRenderedLabel = "";
-  lastRenderedDir = '\0';
-}
-
-void drawWaitingForAppScreen() {
-  if (lastRenderedLabel == "WAITING_FOR_APP") return;
-  
-  tft.fillScreen(ST7735_BLACK);
-  tft.setTextColor(ST7735_CYAN);
-  tft.setTextSize(1);
-  tft.setCursor(10, 15);
-  tft.print("Status: Waiting for App");
-
-  tft.setTextColor(ST7735_WHITE);
-  tft.setCursor(10, 35);
-  tft.print("IP: ");
-  tft.print(WiFi.localIP().toString());
-
-  tft.setTextColor(ST7735_YELLOW);
-  tft.setCursor(10, 55);
-  tft.print("Open app to pair");
-
-  lastRenderedLabel = "WAITING_FOR_APP";
-  lastRenderedDir = '\0';
-}
-
-void drawStandbyScreen() {
-  if (lastRenderedLabel == "CONNECTED") return;
-
-  tft.fillScreen(ST7735_BLACK);
-  tft.setTextColor(ST7735_CYAN);
-  tft.setTextSize(2);
-  tft.setCursor(15, 20);
-  tft.print("CONNECTED");
-  tft.setTextColor(ST7735_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(10, 50);
-  tft.print("Device Ready");
-  
-  lastRenderedLabel = "CONNECTED";
   lastRenderedDir = '\0';
 }
 

@@ -8,8 +8,10 @@ import {
   ActivityIndicator,
   RefreshControl,
   ScrollView,
+  StatusBar,
 } from 'react-native';
-import { Ionicons, Feather } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { supabase } from '../services/supabaseClient';
 
 const MONTHS = [
@@ -29,13 +31,225 @@ const MONTHS = [
 ];
 
 const FRIENDLY_TYPES = [
-  { label: 'All Alerts', value: 'ALL', icon: 'bell' },
-  { label: 'Device & Power', value: 'device', icon: 'cpu' },
-  { label: 'Battery', value: 'battery', icon: 'battery-charging' },
-  { label: 'Location Updates', value: 'location', icon: 'map-pin' },
-  { label: 'Settings & Sync', value: 'settings', icon: 'sliders' },
-  { label: 'Group Members', value: 'group', icon: 'users' },
+  { label: 'All Alerts', value: 'ALL', icon: 'bell', iconType: 'feather' },
+  { label: 'Sound Detections', value: 'sound', icon: 'volume-2', iconType: 'feather' },
+  { label: 'Device & Power', value: 'device', icon: 'cpu', iconType: 'feather' },
+  { label: 'Battery', value: 'battery', icon: 'battery-charging', iconType: 'feather' },
+  { label: 'Location Updates', value: 'location', icon: 'map-pin', iconType: 'feather' },
+  { label: 'Settings & Sync', value: 'settings', icon: 'sliders', iconType: 'feather' },
+  { label: 'Group Members', value: 'group', icon: 'users', iconType: 'feather' },
 ];
+
+const parseTimestamp = (dateString) => {
+  if (!dateString) return null;
+  let formattedStr = typeof dateString === 'string' ? dateString.trim().replace(' ', 'T') : dateString;
+  if (typeof formattedStr === 'string' && !formattedStr.endsWith('Z') && !formattedStr.includes('+')) {
+    formattedStr += 'Z';
+  }
+  const parsedDate = new Date(formattedStr);
+  return isNaN(parsedDate.getTime()) ? null : parsedDate;
+};
+
+const formatUserFriendlyMessage = (title, message, notification_type, metadata) => {
+  const safeTitle = typeof title === 'string' ? title : '';
+  const safeMessage = typeof message === 'string' ? message : '';
+  const safeType = typeof notification_type === 'string' ? notification_type : '';
+  const safeMeta = typeof metadata === 'string' ? metadata : (metadata ? JSON.stringify(metadata) : '');
+
+  const text = `${safeTitle} ${safeMessage} ${safeType} ${safeMeta}`.toLowerCase();
+
+  // --- Sound Classification Cases ---
+  if (safeType === 'sound_detection' || text.includes('detected') || text.includes('sound') || text.includes('siren') || text.includes('horn') || text.includes('bark') || text.includes('cry') || text.includes('knock') || text.includes('alarm')) {
+    if (text.includes('siren') || text.includes('emergency')) {
+      return { title: 'Emergency Siren Detected', desc: safeMessage || 'A high-priority emergency siren sound was detected nearby.' };
+    }
+    if (text.includes('horn') || text.includes('car horn') || text.includes('vehicle')) {
+      return { title: 'Vehicle Horn Detected', desc: safeMessage || 'A vehicle or car horn sound was detected nearby.' };
+    }
+    if (text.includes('bark') || text.includes('dog')) {
+      return { title: 'Dog Bark Detected', desc: safeMessage || 'A dog barking sound was detected.' };
+    }
+    if (text.includes('cry') || text.includes('baby')) {
+      return { title: 'Baby Crying Detected', desc: safeMessage || 'A baby crying sound was detected.' };
+    }
+    if (text.includes('knock') || text.includes('doorbell') || text.includes('door')) {
+      return { title: 'Door Knock / Bell Detected', desc: safeMessage || 'A door knock or doorbell sound was detected.' };
+    }
+    if (text.includes('alarm') || text.includes('fire') || text.includes('smoke')) {
+      return { title: 'Alarm Sound Detected', desc: safeMessage || 'A safety or fire alarm was detected.' };
+    }
+    if (text.includes('shout') || text.includes('scream') || text.includes('yell')) {
+      return { title: 'Loud Voice / Scream Detected', desc: safeMessage || 'A high-intensity voice or distress sound was detected.' };
+    }
+    return { title: safeTitle || 'Sound Alert Detected', desc: safeMessage || 'Sonoband detected an important environmental sound.' };
+  }
+
+  // 1. Device Registration
+  if (safeMeta === 'REGISTERED' || text.includes('registered')) {
+    return { title: 'New Device Registered', desc: safeMessage || 'Your Sonoband device has been successfully registered.' };
+  }
+
+  // 2. Disconnection / Connection Handling
+  if (safeType === 'connection_status' || text.includes('disconnected') || text.includes('lost connection') || text.includes('timeout')) {
+    return { 
+      title: 'Device Disconnected', 
+      desc: safeMessage || 'Sonoband lost connection to the mobile app or Wi-Fi network.' 
+    };
+  }
+
+  if (text.includes('connected') || text.includes('paired')) {
+    return { 
+      title: 'Device Connected', 
+      desc: safeMessage || 'Sonoband is successfully paired and connected.' 
+    };
+  }
+
+  // 3. Power On / Off Handling
+  if (
+    safeType === 'device_toggle' ||
+    text.includes('turned on') ||
+    text.includes('turned off') ||
+    text.includes('power_on') ||
+    text.includes('power_off') ||
+    safeMeta === 'ON' ||
+    safeMeta === 'OFF'
+  ) {
+    const isOff = text.includes('off') || safeMeta === 'OFF';
+    return {
+      title: isOff ? 'Device Turned Off' : 'Device Turned On',
+      desc: safeMessage || (isOff ? 'Your Sonoband listening mode was turned OFF.' : 'Your Sonoband listening mode was turned ON.'),
+    };
+  }
+
+  // 4. Battery
+  if (safeType === 'battery_update' || text.includes('battery')) {
+    if (text.includes('full') || text.includes('100') || safeMeta === 'FULL') {
+      return { title: 'Battery Full', desc: safeMessage || 'Sonoband device is fully charged.' };
+    }
+    return { title: 'Low Battery Warning', desc: safeMessage || 'Sonoband battery is running low. Please charge soon.' };
+  }
+
+  // 5. Location
+  if (safeType === 'location_update' || text.includes('location') || text.includes('gps') || text.includes('map')) {
+    return { title: safeTitle || 'Location Updated', desc: safeMessage || 'Map location was updated.' };
+  }
+
+  // 6. Settings
+  if (safeType === 'settings_sync' || text.includes('settings') || text.includes('sync') || text.includes('threshold') || text.includes('vibration')) {
+    return { title: safeTitle || 'Settings Synced', desc: safeMessage || 'Device configuration has been synchronized.' };
+  }
+
+  // 7. Group Members
+  if (safeType === 'group_update' || text.includes('member') || text.includes('joined') || text.includes('group')) {
+    return { title: safeTitle || 'New Group Member', desc: safeMessage || 'A new member has joined your Emergency Sync Group.' };
+  }
+
+  return { title: safeTitle || 'System Notification', desc: safeMessage || 'System activity logged.' };
+};
+
+const getEventIcon = (title, message, notification_type, metadata) => {
+  const safeTitle = typeof title === 'string' ? title : '';
+  const safeMessage = typeof message === 'string' ? message : '';
+  const safeType = typeof notification_type === 'string' ? notification_type : '';
+  const safeMeta = typeof metadata === 'string' ? metadata : (metadata ? JSON.stringify(metadata) : '');
+
+  const text = `${safeTitle} ${safeMessage} ${safeType} ${safeMeta}`.toLowerCase();
+
+  // --- Sound Detection Classifications ---
+  if (safeType === 'sound_detection' || text.includes('siren') || text.includes('horn') || text.includes('bark') || text.includes('cry') || text.includes('knock') || text.includes('alarm') || text.includes('shout')) {
+    if (text.includes('siren') || text.includes('emergency')) {
+      return { library: 'Ionicons', icon: 'warning', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'sound' };
+    }
+    if (text.includes('horn') || text.includes('car horn') || text.includes('vehicle')) {
+      return { library: 'MaterialCommunityIcons', icon: 'car-horn', color: '#F59E0B', bg: 'rgba(245, 158, 11, 0.15)', category: 'sound' };
+    }
+    if (text.includes('bark') || text.includes('dog')) {
+      return { library: 'MaterialCommunityIcons', icon: 'dog-side', color: '#10B981', bg: 'rgba(16, 185, 129, 0.15)', category: 'sound' };
+    }
+    if (text.includes('cry') || text.includes('baby')) {
+      return { library: 'MaterialCommunityIcons', icon: 'baby-bottle-outline', color: '#EC4899', bg: 'rgba(236, 72, 153, 0.15)', category: 'sound' };
+    }
+    if (text.includes('knock') || text.includes('doorbell') || text.includes('door')) {
+      return { library: 'MaterialCommunityIcons', icon: 'doorbell', color: '#8B5CF6', bg: 'rgba(139, 92, 246, 0.15)', category: 'sound' };
+    }
+    if (text.includes('alarm') || text.includes('fire')) {
+      return { library: 'Ionicons', icon: 'alarm-outline', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'sound' };
+    }
+    if (text.includes('shout') || text.includes('scream') || text.includes('yell')) {
+      return { library: 'Ionicons', icon: 'mega-outline', color: '#F97316', bg: 'rgba(249, 115, 22, 0.15)', category: 'sound' };
+    }
+    return { library: 'Feather', icon: 'volume-2', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'sound' };
+  }
+
+  // Registration
+  if (safeMeta === 'REGISTERED' || text.includes('registered')) {
+    return { library: 'Feather', icon: 'plus-circle', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'device' };
+  }
+
+  // Disconnection / Connectivity
+  if (safeType === 'connection_status' || text.includes('disconnected') || text.includes('lost connection') || text.includes('timeout')) {
+    return { library: 'Feather', icon: 'link-2', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'device' };
+  }
+  if (text.includes('connected') || text.includes('paired')) {
+    return { library: 'Feather', icon: 'link', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)', category: 'device' };
+  }
+
+  // Power On / Off
+  if (
+    safeType === 'device_toggle' ||
+    text.includes('turned on') ||
+    text.includes('turned off') ||
+    text.includes('power_on') ||
+    text.includes('power_off') ||
+    safeMeta === 'ON' ||
+    safeMeta === 'OFF'
+  ) {
+    const isOff = text.includes('off') || safeMeta === 'OFF';
+    return {
+      library: 'Feather',
+      icon: 'power',
+      color: isOff ? '#EF4444' : '#22C55E',
+      bg: isOff ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 197, 94, 0.15)',
+      category: 'device',
+    };
+  }
+
+  // Battery
+  if (safeType === 'battery_update' || text.includes('battery')) {
+    if (text.includes('full') || text.includes('100') || safeMeta === 'FULL') {
+      return { library: 'Feather', icon: 'battery-charging', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)', category: 'battery' };
+    }
+    return { library: 'Feather', icon: 'battery', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'battery' };
+  }
+
+  // Location
+  if (safeType === 'location_update' || text.includes('location') || text.includes('gps') || text.includes('map')) {
+    return { library: 'Feather', icon: 'map-pin', color: '#F97316', bg: 'rgba(249, 115, 22, 0.15)', category: 'location' };
+  }
+
+  // Settings
+  if (safeType === 'settings_sync' || text.includes('settings') || text.includes('sync') || text.includes('threshold') || text.includes('vibration')) {
+    return { library: 'Feather', icon: 'sliders', color: '#06B6D4', bg: 'rgba(6, 182, 212, 0.15)', category: 'settings' };
+  }
+
+  // Group
+  if (safeType === 'group_update' || text.includes('member') || text.includes('joined') || text.includes('group')) {
+    return { library: 'Feather', icon: 'user-plus', color: '#A855F7', bg: 'rgba(168, 85, 247, 0.15)', category: 'group' };
+  }
+
+  return { library: 'Feather', icon: 'bell', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'device' };
+};
+
+// Helper component to render icon dynamically by vector library name
+const RenderCategoryIcon = ({ library, icon, size = 20, color = '#38BDF8' }) => {
+  if (library === 'Ionicons') {
+    return <Ionicons name={icon} size={size} color={color} />;
+  }
+  if (library === 'MaterialCommunityIcons') {
+    return <MaterialCommunityIcons name={icon} size={size} color={color} />;
+  }
+  return <Feather name={icon} size={size} color={color} />;
+};
 
 export default function NotificationScreen({ navigation, onNavigate, userId }) {
   const [notifications, setNotifications] = useState([]);
@@ -43,20 +257,10 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   const [refreshing, setRefreshing] = useState(false);
   const [currentUserId, setCurrentUserId] = useState(userId || null);
 
-  const today = new Date();
+  const today = useMemo(() => new Date(), []);
   const [selectedMonth, setSelectedMonth] = useState('ALL');
   const [selectedDay, setSelectedDay] = useState('ALL');
   const [selectedType, setSelectedType] = useState('ALL');
-
-  const parseTimestamp = (dateString) => {
-    if (!dateString) return null;
-    let formattedStr = typeof dateString === 'string' ? dateString.trim().replace(' ', 'T') : dateString;
-    if (typeof formattedStr === 'string' && !formattedStr.endsWith('Z') && !formattedStr.includes('+')) {
-      formattedStr += 'Z';
-    }
-    const parsedDate = new Date(formattedStr);
-    return isNaN(parsedDate.getTime()) ? null : parsedDate;
-  };
 
   const fetchNotifications = useCallback(async () => {
     try {
@@ -122,18 +326,18 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   useEffect(() => {
     fetchNotifications();
 
-    if (!userId) return;
-    const parsedId = Number(userId);
+    const targetId = currentUserId || userId;
+    if (!targetId) return;
 
     const channel = supabase
-      .channel(`user_notifications_${parsedId}`)
+      .channel(`user_notifications_${targetId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'notifications',
-          filter: `user_id=eq.${parsedId}`,
+          filter: `user_id=eq.${targetId}`,
         },
         () => {
           fetchNotifications();
@@ -144,18 +348,18 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [userId, fetchNotifications]);
+  }, [userId, currentUserId, fetchNotifications]);
 
   const daysInMonth = useMemo(() => {
     if (selectedMonth === 'ALL') return 31;
     return new Date(today.getFullYear(), selectedMonth + 1, 0).getDate();
-  }, [selectedMonth]);
+  }, [selectedMonth, today]);
 
   useEffect(() => {
     if (selectedDay !== 'ALL' && selectedDay > daysInMonth) {
       setSelectedDay(daysInMonth);
     }
-  }, [daysInMonth]);
+  }, [daysInMonth, selectedDay]);
 
   const isDayInFuture = (day) => {
     if (selectedMonth === 'ALL' || day === 'ALL') return false;
@@ -187,120 +391,6 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
     };
   };
 
-  const formatUserFriendlyMessage = (title, message, notification_type, metadata) => {
-    const text = `${title || ''} ${message || ''} ${notification_type || ''} ${metadata || ''}`.toLowerCase();
-
-    // 1. Device Registration
-    if (metadata === 'REGISTERED' || text.includes('registered')) {
-      return { title: 'New Device Registered', desc: message || 'Your Sonoband device has been successfully registered.' };
-    }
-
-    // 2. Explicit Device Power Toggle (Turned ON / Turned OFF)
-    if (
-      notification_type === 'device_toggle' ||
-      text.includes('turned on') ||
-      text.includes('turned off') ||
-      text.includes('power_on') ||
-      text.includes('power_off') ||
-      metadata === 'ON' ||
-      metadata === 'OFF'
-    ) {
-      const isOff = text.includes('off') || metadata === 'OFF';
-      return {
-        title: isOff ? 'Device Turned Off' : 'Device Turned On',
-        desc: message || (isOff ? 'Your Sonoband device was turned OFF.' : 'Your Sonoband device was turned ON.'),
-      };
-    }
-
-    // 3. Battery Alerts
-    if (notification_type === 'battery_update' || text.includes('battery')) {
-      if (text.includes('full') || text.includes('100') || metadata === 'FULL') {
-        return { title: 'Battery Full', desc: message || 'Sonoband device is fully charged.' };
-      }
-      return { title: 'Low Battery Warning', desc: message || 'Sonoband battery is running low. Please charge soon.' };
-    }
-
-    // 4. Location Updates
-    if (notification_type === 'location_update' || text.includes('location') || text.includes('gps') || text.includes('map')) {
-      return { title: title || 'Location Updated', desc: message || 'Map location was updated by the user or caregiver.' };
-    }
-
-    // 5. Settings Updates
-    if (notification_type === 'settings_sync' || text.includes('settings') || text.includes('sync') || text.includes('threshold') || text.includes('vibration')) {
-      return { title: title || 'Settings Synced', desc: message || 'Device configuration has been synchronized.' };
-    }
-
-    // 6. Emergency Group Updates
-    if (notification_type === 'group_update' || text.includes('member') || text.includes('joined') || text.includes('group')) {
-      return { title: title || 'New Group Member', desc: message || 'A new member has joined your Emergency Sync Group.' };
-    }
-
-    // 7. Connectivity status (Only fallback to connection/disconnection if not explicitly power)
-    if (text.includes('connected') && !text.includes('disconnected')) {
-      return { title: 'Device Connected', desc: message || 'Your device is connected.' };
-    }
-    if (text.includes('disconnected') || text.includes('timeout')) {
-      return { title: 'Device Disconnected', desc: message || 'Lost connection to your device.' };
-    }
-
-    return { title: title || 'System Notification', desc: message || 'System activity logged.' };
-  };
-
-  const getEventIcon = (title, message, notification_type, metadata) => {
-    const text = `${title || ''} ${message || ''} ${notification_type || ''} ${metadata || ''}`.toLowerCase();
-
-    if (metadata === 'REGISTERED' || text.includes('registered')) {
-      return { icon: 'plus-circle', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'device' };
-    }
-
-    // Power Status Icon (Red power icon for OFF, Green power icon for ON)
-    if (
-      notification_type === 'device_toggle' ||
-      text.includes('turned on') ||
-      text.includes('turned off') ||
-      text.includes('power_on') ||
-      text.includes('power_off') ||
-      metadata === 'ON' ||
-      metadata === 'OFF'
-    ) {
-      const isOff = text.includes('off') || metadata === 'OFF';
-      return {
-        icon: 'power',
-        color: isOff ? '#EF4444' : '#22C55E',
-        bg: isOff ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 197, 94, 0.15)',
-        category: 'device',
-      };
-    }
-
-    if (notification_type === 'battery_update' || text.includes('battery')) {
-      if (text.includes('full') || text.includes('100') || metadata === 'FULL') {
-        return { icon: 'battery-charging', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)', category: 'battery' };
-      }
-      return { icon: 'battery', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'battery' };
-    }
-
-    if (notification_type === 'location_update' || text.includes('location') || text.includes('gps') || text.includes('map')) {
-      return { icon: 'map-pin', color: '#F97316', bg: 'rgba(249, 115, 22, 0.15)', category: 'location' };
-    }
-
-    if (notification_type === 'settings_sync' || text.includes('settings') || text.includes('sync') || text.includes('threshold') || text.includes('vibration')) {
-      return { icon: 'sliders', color: '#06B6D4', bg: 'rgba(6, 182, 212, 0.15)', category: 'settings' };
-    }
-
-    if (notification_type === 'group_update' || text.includes('member') || text.includes('joined') || text.includes('group')) {
-      return { icon: 'user-plus', color: '#A855F7', bg: 'rgba(168, 85, 247, 0.15)', category: 'group' };
-    }
-
-    if (text.includes('connected') && !text.includes('disconnected')) {
-      return { icon: 'link', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)', category: 'device' };
-    }
-    if (text.includes('disconnected') || text.includes('timeout')) {
-      return { icon: 'link-2', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', category: 'device' };
-    }
-
-    return { icon: 'bell', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)', category: 'device' };
-  };
-
   const filteredNotifications = useMemo(() => {
     return notifications.filter((item) => {
       const itemDate = parseTimestamp(item.created_at);
@@ -330,7 +420,9 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <StatusBar barStyle="light-content" backgroundColor="#1E293B" />
+      
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconButton} onPress={handleBackNavigation}>
@@ -446,7 +538,7 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
       ) : (
         <FlatList
           data={filteredNotifications}
-          keyExtractor={(item) => item.id?.toString() || Math.random().toString()}
+          keyExtractor={(item, index) => (item?.id != null ? String(item.id) : String(index))}
           contentContainerStyle={{ padding: 16 }}
           refreshControl={
             <RefreshControl
@@ -469,24 +561,25 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
             return (
               <View style={styles.itemCard}>
                 <View style={[styles.iconWrapper, { backgroundColor: iconConfig.bg }]}>
-                  <Feather
-                    name={iconConfig.icon}
+                  <RenderCategoryIcon
+                    library={iconConfig.library}
+                    icon={iconConfig.icon}
                     size={20}
                     color={iconConfig.color}
                   />
                 </View>
 
                 <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={styles.actionTitle}>{friendly.title}</Text>
-                  <Text style={styles.detailsText}>{friendly.desc}</Text>
-                  <Text style={styles.timeText}>{dateStr} • {timeStr}</Text>
+                  <Text style={styles.actionTitle}>{String(friendly.title || '')}</Text>
+                  <Text style={styles.detailsText}>{String(friendly.desc || '')}</Text>
+                  <Text style={styles.timeText}>{`${dateStr} • ${timeStr}`}</Text>
                 </View>
               </View>
             );
           }}
         />
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -496,8 +589,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 50,
-    paddingBottom: 16,
+    paddingVertical: 16,
     backgroundColor: '#1E293B',
     borderBottomWidth: 1,
     borderBottomColor: '#334155',

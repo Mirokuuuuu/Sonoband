@@ -34,17 +34,15 @@ export default function DevicePairingScreen({
   const [ipAddressInput, setIpAddressInput] = useState(deviceIp || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Helper to validate user ID (supports both Integer IDs and UUID strings)
   const isValidUserId = (id) => id !== null && id !== undefined && String(id).trim().length > 0;
 
   const createNotification = async (type, title, message, metadata) => {
     if (!isValidUserId(userId)) return;
     try {
-      const parsedUserId = parseInt(userId, 10);
-      if (isNaN(parsedUserId)) return;
-
       await supabase.from('notifications').insert([
         {
-          user_id: parsedUserId,
+          user_id: userId,
           notification_type: type,
           title: title,
           message: message,
@@ -61,13 +59,10 @@ export default function DevicePairingScreen({
     if (!isValidUserId(userId)) return;
 
     try {
-      const parsedUserId = parseInt(userId, 10);
-      const queryId = isNaN(parsedUserId) ? userId : parsedUserId;
-
       const { data, error } = await supabase
         .from('user_devices')
         .select('*')
-        .eq('user_id', queryId);
+        .eq('user_id', userId);
 
       if (error) throw error;
       setPairedDevices(data || []);
@@ -127,30 +122,37 @@ export default function DevicePairingScreen({
 
       if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
 
-      // Notify ESP32 over HTTP
-      await sendHardwareCommand(resolvedIp, 'connect');
+      // Preserve existing device power state instead of forcing is_on: true
+      const keepPowerState = device.is_on ?? false;
 
+      // Notify ESP32 over HTTP
+      await sendHardwareCommand(resolvedIp, 'connect', { is_on: keepPowerState });
+
+      // Update last seen and IP without overriding power state automatically
       await supabase
         .from('user_devices')
-        .update({ is_on: false, last_seen: new Date().toISOString(), ip_address: resolvedIp })
+        .update({ 
+          last_seen: new Date().toISOString(), 
+          ip_address: resolvedIp 
+        })
         .eq('id', device.id);
 
       await createNotification(
         'device_registration',
         'Device Connected',
-        `Connected to ${device.device_name || 'SonoBand'} successfully. Device set to Standby.`,
-        'OFF'
+        `Connected to ${device.device_name || 'SonoBand'} successfully.`,
+        keepPowerState ? 'ON' : 'OFF'
       );
 
       if (typeof onSelectDevice === 'function') {
-        onSelectDevice({ ...device, is_on: false, ip_address: resolvedIp });
+        onSelectDevice({ ...device, ip_address: resolvedIp });
       }
-      
+
       if (typeof setSyncState === 'function') {
         setSyncState('SUCCESS');
       }
 
-      Alert.alert('Connected', `Connected to ${device.device_name} successfully (Standby mode). Use Device Controls to turn ON.`);
+      Alert.alert('Connected', `Connected to ${device.device_name} successfully!`);
       fetchPairedDevices();
     } catch (err) {
       if (typeof setSyncState === 'function') setSyncState('IDLE');
@@ -172,7 +174,6 @@ export default function DevicePairingScreen({
               await sendHardwareCommand(resolvedIp, 'disconnect');
             }
 
-            // Set last_seen to 1970 epoch so recent activity checks fail
             const { error } = await supabase
               .from('user_devices')
               .update({ is_on: false, last_seen: new Date(0).toISOString() })
@@ -263,18 +264,16 @@ export default function DevicePairingScreen({
     try {
       if (typeof setSyncState === 'function') setSyncState('SYNCING');
 
-      // Test live hardware ping
       const isHardwareAlive = await sendHardwareCommand(resolvedIp, 'ping');
 
       const uniqueMac = macAddressInput.trim() || `MANUAL_${Date.now()}`;
-      const parsedUserId = parseInt(userId, 10);
-      const insertUserId = isNaN(parsedUserId) ? userId : parsedUserId;
 
+      // Default is_on to false upon registration to prevent auto power-on
       const { data, error } = await supabase
         .from('user_devices')
         .insert([
           {
-            user_id: insertUserId,
+            user_id: userId,
             device_name: deviceNameInput.trim(),
             mac_address: uniqueMac,
             ip_address: resolvedIp,
@@ -287,7 +286,7 @@ export default function DevicePairingScreen({
       if (error) throw error;
 
       if (isHardwareAlive) {
-        await sendHardwareCommand(resolvedIp, 'connect');
+        await sendHardwareCommand(resolvedIp, 'connect', { is_on: false });
         if (typeof setSyncState === 'function') setSyncState('SUCCESS');
         if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
 
@@ -296,7 +295,7 @@ export default function DevicePairingScreen({
           onSelectDevice(registeredDevice);
         }
 
-        Alert.alert('Device Saved & Connected', 'Device registered and reachable over the network!');
+        Alert.alert('Device Saved & Paired', 'Device registered and reachable over the network!');
       } else {
         if (typeof setSyncState === 'function') setSyncState('IDLE');
         Alert.alert('Saved (Offline)', 'Device details saved, but the device was not reachable on the network.');

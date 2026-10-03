@@ -66,14 +66,14 @@ export default function DeviceControlScreen({
     fetchDeviceSettings();
   }, [userId]);
 
-  // Sync prop changes from App.js if available
+  // Sync prop changes from parent components if available
   useEffect(() => {
     if (typeof isDeviceOn === 'boolean') {
       setDevicePower(isDeviceOn);
     }
   }, [isDeviceOn]);
 
-  // Background Heartbeat Loop to keep ESP32 alive
+  // Background Heartbeat Loop to keep ESP32 connection alive
   useEffect(() => {
     if (deviceIp) {
       pingIntervalRef.current = setInterval(async () => {
@@ -135,7 +135,7 @@ export default function DeviceControlScreen({
         setMacAddress(device.mac_address || null);
         setDeviceIp(device.ip_address || device.ip);
 
-        // Power Status strictly adheres to DB value
+        // Sync Power Status
         const isDbOn = Boolean(device.is_on);
         setDevicePower(isDbOn);
         if (typeof setIsDeviceOn === 'function') {
@@ -148,20 +148,20 @@ export default function DeviceControlScreen({
           if (typeof device.vibration_intensity === 'string') {
             loadedVib = device.vibration_intensity;
           } else {
-            loadedVib = device.vibration_intensity <= 2 ? 'low' : device.vibration_intensity >= 4 ? 'high' : 'medium';
+            loadedVib = device.vibration_intensity <= 120 ? 'low' : device.vibration_intensity >= 220 ? 'high' : 'medium';
           }
         }
         setVibrationLevel(loadedVib);
         setInitialVibration(loadedVib);
 
-        // Parse Sound Threshold / Range
+        // Parse Sound Sensitivity Range
         let loadedRange = 'narrow';
         const rawSensitivity = device.sound_threshold ?? device.sensitivity;
         if (rawSensitivity !== null && rawSensitivity !== undefined) {
           if (typeof rawSensitivity === 'string') {
             loadedRange = rawSensitivity;
           } else {
-            loadedRange = rawSensitivity >= 65 ? 'narrow' : 'broad';
+            loadedRange = rawSensitivity <= 1000 ? 'broad' : 'narrow';
           }
         }
         setMicRange(loadedRange);
@@ -217,7 +217,8 @@ export default function DeviceControlScreen({
       await sendHardwareCommand(deviceIp, 'config', { 
         is_on: newValue,
         vibration_intensity: vibrationLevel,
-        sound_threshold: micRange 
+        sound_threshold: micRange,
+        sensitivity: micRange
       });
     }
 
@@ -263,12 +264,12 @@ export default function DeviceControlScreen({
         sensitivity: micRange,
       };
 
-      // 1. Push settings directly to ESP32
+      // 1. Push settings directly to ESP32 Hardware
       if (deviceIp) {
         await sendHardwareCommand(deviceIp, 'config', settingsPayload);
       }
 
-      // 2. Sync settings into Supabase
+      // 2. Sync settings into Supabase database
       const updates = {
         ...settingsPayload,
         user_id: String(userId).trim(),
@@ -479,7 +480,7 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justify: 'space-between',
+    justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingVertical: 14,
     borderBottomWidth: 1,

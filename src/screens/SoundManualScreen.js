@@ -8,7 +8,7 @@ const SOUND_MANUAL_LIST = [
   { id: 'fallen_object', label: 'Fallen Object', priority: 'CRITICAL', icon: 'alert-decagram', desc: 'Heavy impact or sharp crash on floor.' },
   { id: 'glass_breaking', label: 'Glass Breaking', priority: 'HIGH', icon: 'glass-fragile', desc: 'Shattering glass, windows, or dishes.' },
   { id: 'baby_crying', label: 'Baby Crying', priority: 'HIGH', icon: 'baby-carriage', desc: 'Infant crying or distress sounds.' },
-  { id: 'someone_calling', label: 'Someone Calling', priority: 'HIGH', icon: 'account-voice', desc: 'Human speech directly calling out or shouting.' },
+  { id: 'speech', label: 'Conversational Speech', priority: 'MEDIUM', icon: 'account-voice', desc: 'General ambient human conversation, speaking, or shouting.' },
   { id: 'door_knock', label: 'Door Knock', priority: 'MEDIUM', icon: 'door', desc: 'Rhythmic knocking sound on wooden or metal doors.' },
   { id: 'doorbell', label: 'Doorbell', priority: 'MEDIUM', icon: 'bell-ring', desc: 'Standard electronic or mechanical door chime.' },
   { id: 'alarm_clock', label: 'Alarm Clock', priority: 'MEDIUM', icon: 'clock-outline', desc: 'Repetitive daily alarm or timer chime.' },
@@ -16,7 +16,6 @@ const SOUND_MANUAL_LIST = [
   { id: 'vehicle_horn', label: 'Vehicle Horn', priority: 'LOW', icon: 'car-horn', desc: 'Honking cars or traffic safety horns.' },
   { id: 'dog_barking', label: 'Dog Barking', priority: 'LOW', icon: 'dog', desc: 'Repetitive canine vocalization.' },
   { id: 'clapping', label: 'Clapping', priority: 'LOW', icon: 'hands-pray', desc: 'Audible hand applause or double clapping.' },
-  { id: 'speech', label: 'Conversational Speech', priority: 'LOW', icon: 'account-group', desc: 'General ambient human conversation.' },
 ];
 
 export default function SoundManualScreen({ navigation }) {
@@ -42,7 +41,7 @@ export default function SoundManualScreen({ navigation }) {
       </View>
 
       <Text style={styles.subTitle}>
-        List of all 14 sound classes automatically monitored by SonoBand.
+        List of all 13 sound classes automatically monitored by SonoBand.
       </Text>
 
       <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>

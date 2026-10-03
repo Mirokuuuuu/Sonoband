@@ -104,17 +104,15 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
         type: item.notification_type,
         title: item.title,
         message: item.message,
-        metadata: item.metadata,
         created_at: item.created_at,
       }));
 
-      // 4. Format audit logs (Login & Logout Events mapped, but filtered out below)
+      // 4. Format audit logs
       const formattedAudits = (auditRes.data || []).map((item) => ({
         id: `audit_${item.id}`,
-        type: item.action, // 'login' or 'logout'
+        type: item.action,
         title: `${item.user_name || 'User'} (${item.action.toUpperCase()})`,
         message: item.details || `${item.user_name || 'User'} performed ${item.action}.`,
-        metadata: null,
         created_at: item.created_at,
       }));
 
@@ -193,9 +191,6 @@ export default function CaregiverNotificationsScreen({ navigation, onNavigate, u
             <Text style={styles.time}>{formattedTime}</Text>
           </View>
           <Text style={styles.message}>{item.message}</Text>
-          {item.metadata && (
-            <Text style={styles.metadata}>Location Details: {item.metadata}</Text>
-          )}
         </View>
       </View>
     );
@@ -252,7 +247,6 @@ const styles = StyleSheet.create({
   title: { color: '#F8FAFC', fontSize: 15, fontWeight: 'bold', flex: 1, marginRight: 8 },
   time: { color: '#64748B', fontSize: 11 },
   message: { color: '#94A3B8', fontSize: 13, lineHeight: 18 },
-  metadata: { color: '#38BDF8', fontSize: 11, marginTop: 6, fontWeight: '600' },
   emptyContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 60, gap: 12 },
   emptyText: { color: '#64748B', fontSize: 14 }
 });

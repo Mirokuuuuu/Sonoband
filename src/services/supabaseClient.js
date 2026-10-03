@@ -27,7 +27,16 @@ export const logSystemActivity = async (
     const finalUserName = userName && userName.trim() ? userName.trim() : 'System User';
     const finalUserEmail = userEmail && userEmail.trim() ? userEmail.trim() : 'N/A';
     
-    const parsedUserId = userId && !isNaN(Number(userId)) ? Number(userId) : null;
+    // Safely parse integer or preserve valid string/UUID user_id
+    let parsedUserId = null;
+    if (userId !== undefined && userId !== null) {
+      if (!isNaN(Number(userId)) && String(userId).trim() !== '') {
+        parsedUserId = Number(userId);
+      } else {
+        parsedUserId = String(userId);
+      }
+    }
+
     const userRole = extraData?.role || 'user';
     const ipAddress = extraData?.ipAddress || 'Mobile App';
 

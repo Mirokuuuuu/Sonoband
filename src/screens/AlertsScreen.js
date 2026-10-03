@@ -16,7 +16,6 @@ export default function AlertsScreen({ navigation, userId }) {
   const parseTimestamp = (timestamp) => {
     if (!timestamp) return null;
     
-    // Ensure string ISO format ends with 'Z' if missing offset (forces UTC interpretation)
     let formattedTs = typeof timestamp === 'string' ? timestamp.trim() : timestamp;
     if (typeof formattedTs === 'string' && !formattedTs.endsWith('Z') && !formattedTs.includes('+')) {
       formattedTs = formattedTs.replace(' ', 'T') + 'Z';
@@ -26,14 +25,31 @@ export default function AlertsScreen({ navigation, userId }) {
     return isNaN(d.getTime()) ? null : d;
   };
 
+  // Helper function to clean metadata and extract direction only
+  const formatMetadata = (metadata) => {
+    if (!metadata) return null;
+
+    const lower = metadata.toLowerCase();
+    if (lower.includes('left')) {
+      return 'Direction: Left';
+    }
+    if (lower.includes('right')) {
+      return 'Direction: Right';
+    }
+
+    const cleanMeta = metadata.split('|')[0].trim();
+    return cleanMeta;
+  };
+
   // Fetch alerts directly from Supabase
   const fetchAlerts = useCallback(async () => {
     if (!userId) return;
 
+    // Match both String and Number user_id representation
     const { data, error } = await supabase
       .from('alerts')
       .select('*')
-      .eq('user_id', userId)
+      .or(`user_id.eq.${userId},user_id.eq.${String(userId)}`)
       .order('detected_at', { ascending: false });
 
     if (error) {
@@ -62,18 +78,21 @@ export default function AlertsScreen({ navigation, userId }) {
   useEffect(() => {
     if (!userId) return;
 
+    const channelName = `public-alerts-${userId}-${Math.floor(Math.random() * 10000)}`;
     const channel = supabase
-      .channel(`public-alerts-${userId}`)
+      .channel(channelName)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'alerts',
-          filter: `user_id=eq.${userId}`,
         },
         (payload) => {
-          setAlerts((prevAlerts) => [payload.new, ...prevAlerts]);
+          // Flexible user_id equality check (String or Number)
+          if (String(payload.new?.user_id) === String(userId)) {
+            setAlerts((prevAlerts) => [payload.new, ...prevAlerts]);
+          }
         }
       )
       .on(
@@ -82,12 +101,13 @@ export default function AlertsScreen({ navigation, userId }) {
           event: 'UPDATE',
           schema: 'public',
           table: 'alerts',
-          filter: `user_id=eq.${userId}`,
         },
         (payload) => {
-          setAlerts((prevAlerts) =>
-            prevAlerts.map((alert) => (alert.id === payload.new.id ? payload.new : alert))
-          );
+          if (String(payload.new?.user_id) === String(userId)) {
+            setAlerts((prevAlerts) =>
+              prevAlerts.map((alert) => (alert.id === payload.new.id ? payload.new : alert))
+            );
+          }
         }
       )
       .subscribe();
@@ -124,15 +144,16 @@ export default function AlertsScreen({ navigation, userId }) {
     const lowerType = (soundType || '').toLowerCase();
     const lowerMeta = (metadata || '').toLowerCase();
 
-    if (lowerMeta.includes('left')) return 'arrow-back-circle-outline';
-    if (lowerMeta.includes('right')) return 'arrow-forward-circle-outline';
     if (lowerType.includes('fire') || lowerType.includes('smoke')) return 'flame-outline';
-    if (lowerType.includes('siren')) return 'alarm-outline';
+    if (lowerType.includes('siren') || lowerType.includes('alarm')) return 'alarm-outline';
     if (lowerType.includes('fall') || lowerType.includes('crash')) return 'warning-outline';
     if (lowerType.includes('glass')) return 'wine-outline';
     if (lowerType.includes('baby') || lowerType.includes('cry')) return 'sad-outline';
     if (lowerType.includes('doorbell') || lowerType.includes('bell')) return 'notifications-outline';
     if (lowerType.includes('dog') || lowerType.includes('bark')) return 'paw-outline';
+
+    if (lowerMeta.includes('left')) return 'arrow-back-circle-outline';
+    if (lowerMeta.includes('right')) return 'arrow-forward-circle-outline';
 
     return 'volume-high-outline';
   };
@@ -244,7 +265,6 @@ export default function AlertsScreen({ navigation, userId }) {
         renderItem={({ item }) => {
           const rawDate = parseTimestamp(item.detected_at);
           
-          // Formats to the device's local timezone automatically
           const formattedTime = rawDate
             ? rawDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })
             : 'Just now';
@@ -257,9 +277,9 @@ export default function AlertsScreen({ navigation, userId }) {
 
           const displayTitle = item.sound_type
             ? item.sound_type
-            : item.metadata
-            ? `Sound Detected (${item.metadata.toUpperCase()})`
             : 'Loud Sound Detected';
+
+          const displayMetadata = formatMetadata(item.metadata);
 
           return (
             <View style={styles.card}>
@@ -274,10 +294,10 @@ export default function AlertsScreen({ navigation, userId }) {
                 </View>
               </View>
 
-              {item.metadata && (
+              {displayMetadata && (
                 <View style={styles.cardBody}>
                   <Text style={styles.metadataText}>
-                    Direction/Info: <Text style={{ color: '#F8FAFC', textTransform: 'capitalize' }}>{item.metadata}</Text>
+                    <Text style={{ color: '#F8FAFC' }}>{displayMetadata}</Text>
                   </Text>
                 </View>
               )}
@@ -306,7 +326,7 @@ const styles = StyleSheet.create({
   },
   topRow: {
     flexDirection: 'row',
-    justify: 'space-between',
+    justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
   },
