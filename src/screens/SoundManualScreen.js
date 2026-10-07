@@ -3,19 +3,25 @@ import { StyleSheet, Text, View, ScrollView, TouchableOpacity, StatusBar, Platfo
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 
 const SOUND_MANUAL_LIST = [
+  // CRITICAL PRIORITY
   { id: 'fire_alarm', label: 'Fire Alarm', priority: 'CRITICAL', icon: 'fire', desc: 'Continuous high-pitched emergency alarm signal.' },
   { id: 'emergency_siren', label: 'Emergency Siren', priority: 'CRITICAL', icon: 'lightbulb-on', desc: 'Ambulance, police, or fire truck siren.' },
   { id: 'fallen_object', label: 'Fallen Object', priority: 'CRITICAL', icon: 'alert-decagram', desc: 'Heavy impact or sharp crash on floor.' },
+  
+  // HIGH PRIORITY
   { id: 'glass_breaking', label: 'Glass Breaking', priority: 'HIGH', icon: 'glass-fragile', desc: 'Shattering glass, windows, or dishes.' },
   { id: 'baby_crying', label: 'Baby Crying', priority: 'HIGH', icon: 'baby-carriage', desc: 'Infant crying or distress sounds.' },
-  { id: 'speech', label: 'Conversational Speech', priority: 'MEDIUM', icon: 'account-voice', desc: 'General ambient human conversation, speaking, or shouting.' },
-  { id: 'door_knock', label: 'Door Knock', priority: 'MEDIUM', icon: 'door', desc: 'Rhythmic knocking sound on wooden or metal doors.' },
+  { id: 'vehicle_horn', label: 'Vehicle Horn', priority: 'HIGH', icon: 'car-connected', desc: 'Honking cars or traffic safety horns.' },
+  { id: 'dog_barking', label: 'Dog Barking', priority: 'HIGH', icon: 'dog', desc: 'Repetitive canine vocalization.' },
+
+  // MEDIUM PRIORITY
   { id: 'doorbell', label: 'Doorbell', priority: 'MEDIUM', icon: 'bell-ring', desc: 'Standard electronic or mechanical door chime.' },
   { id: 'alarm_clock', label: 'Alarm Clock', priority: 'MEDIUM', icon: 'clock-outline', desc: 'Repetitive daily alarm or timer chime.' },
+
+  // LOW PRIORITY
+  { id: 'speech', label: 'Conversational Speech', priority: 'LOW', icon: 'account-voice', desc: 'General ambient human conversation, speaking, or shouting.' },
   { id: 'phone_notification', label: 'Phone Notification', priority: 'LOW', icon: 'cellphone-message', desc: 'Mobile ringtones and text message alerts.' },
-  { id: 'vehicle_horn', label: 'Vehicle Horn', priority: 'LOW', icon: 'car-horn', desc: 'Honking cars or traffic safety horns.' },
-  { id: 'dog_barking', label: 'Dog Barking', priority: 'LOW', icon: 'dog', desc: 'Repetitive canine vocalization.' },
-  { id: 'clapping', label: 'Clapping', priority: 'LOW', icon: 'hands-pray', desc: 'Audible hand applause or double clapping.' },
+  { id: 'door_knock', label: 'Door Knock', priority: 'LOW', icon: 'door', desc: 'Rhythmic knocking sound on wooden or metal doors.' },
 ];
 
 export default function SoundManualScreen({ navigation }) {
@@ -23,7 +29,7 @@ export default function SoundManualScreen({ navigation }) {
     switch (priority) {
       case 'CRITICAL': return { bg: 'rgba(239, 68, 68, 0.2)', text: '#EF4444' };
       case 'HIGH': return { bg: 'rgba(249, 115, 22, 0.2)', text: '#F97316' };
-      case 'MEDIUM': return { bg: 'rgba(56, 189, 248, 0.2)', text: '#38BDF8' };
+      case 'MEDIUM': return { bg: 'rgba(234, 179, 8, 0.2)', text: '#EAB308' }; // Updated yellow tone for clarity
       default: return { bg: 'rgba(148, 163, 184, 0.2)', text: '#94A3B8' };
     }
   };
@@ -41,7 +47,7 @@ export default function SoundManualScreen({ navigation }) {
       </View>
 
       <Text style={styles.subTitle}>
-        List of all 13 sound classes automatically monitored by SonoBand.
+        List of all 12 sound classes automatically monitored by SonoBand.
       </Text>
 
       <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>

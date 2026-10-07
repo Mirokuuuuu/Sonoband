@@ -12,6 +12,13 @@
 // ================= EDGE IMPULSE TINYML HEADER =================
 #include <Johntadipa-project-1_inferencing.h>
 
+// Dynamically set raw audio buffer size based on model expected input length
+#ifndef EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE
+  #define AUDIO_ACCUM_SIZE 16000  // 1.0s window at 16kHz default
+#else
+  #define AUDIO_ACCUM_SIZE EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE
+#endif
+
 // ================= COLOR DEFINITIONS (ST7735 16-bit 565) =================
 #define COLOR_PURE_RED   0x001F  // Renders Vibrant RED on ST7735
 #define COLOR_PURE_BLUE  0xF800  // Renders Vibrant BLUE on ST7735
@@ -19,7 +26,12 @@
 
 // ================= USER WI-FI SETTINGS =================
 const char* ssid     = "Connect ka? Wag na!";     
-const char* password = "136722100143123";      
+const char* password = "136722100143123";    
+
+// ================= SUPABASE CONFIGURATION =================
+const char* SUPABASE_URL = "https://qdmwobrwokpczqwezjzs.supabase.co";
+const char* SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkbXdvYnJ3b2twY3pxd2V6anpzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyNjg1MDgsImV4cCI6MjA5Nzg0NDUwOH0.dDn4oJE78IcgDHX5U2FbhxHaHFWFbwqP0AbjT5AajY8";
+const String SUPABASE_ALERTS_ENDPOINT = String(SUPABASE_URL) + "/rest/v1/alerts";
 
 // ================= NETWORK & UDP / HTTP SETTINGS =================
 IPAddress appIP;                                
@@ -42,6 +54,9 @@ const unsigned long ANNOUNCE_INTERVAL = 3000;
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 #define VIB_MOTOR_PIN 32 
+#define VIB_PWM_CHANNEL 0
+#define VIB_PWM_FREQ    5000
+#define VIB_PWM_RES     8
 
 // I2S Pins for INMP441 Dual Microphones
 #define I2S_WS   25  // Word Select
@@ -54,10 +69,28 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 int32_t i2sRawBuffer[I2S_BUFFER_LEN];
 
-// Audio collection buffer: 8000 PCM samples = 0.5s window at 16 kHz
-#define AUDIO_ACCUM_SIZE 8000
+// Audio buffers allocated statically to avoid dynamic heap fragmentation
 int16_t monoSendBuffer[AUDIO_ACCUM_SIZE];
-int accumIndex = 0;
+static int16_t inferenceBuffer[AUDIO_ACCUM_SIZE];
+
+// Dynamic Audio Data Transfer Structure for Task Queue
+typedef struct {
+  long peakLeft;
+  long peakRight;
+  long avgEnergy;
+} AudioFrameMeta;
+
+AudioFrameMeta frameMeta;
+QueueHandle_t audioQueue;
+TaskHandle_t audioTaskHandle = NULL;
+
+// ================= HARDWARE NOISE & GAIN CONSTANTS =================
+const float micLeftGain = 1.0f;
+const float micRightGain = 1.0f;
+
+int noiseFloor = 300;                       // Baseline peak floor
+const long dynamicMinEnergy = 50;           // Lowered energy floor
+const int DIRECTION_THRESHOLD_DIFF = 250;  // Minimum delta to declare L or R
 
 // ================= STATE VARIABLES =================
 bool deviceOn = false;               
@@ -65,9 +98,8 @@ bool isConnectedToApp = false;
 
 unsigned long lastHeartbeat = 0;   
 
-int noiseFloor = 2500;             // Dynamic mic threshold (Default Narrow: 2500, Broad: 500)
-String currentLoggedInUser = "21"; // Default fallback user ID
-int vibrationPwmValue = 190;       // Dynamic vibration strength (Default Medium: 190)
+String currentLoggedInUser = "21"; 
+int vibrationPwmValue = 190;       // Dynamic vibration strength (Low: 120, Medium: 190, High: 255)
 
 String activeSoundType = "Listening..."; 
 String currentDisplayLabel = "Ready to Detect";
@@ -98,39 +130,93 @@ IPAddress getBroadcastIP() {
   return broadcast;
 }
 
-// Helper to determine vibration duration (in ms) based on sound category/class
+// Helper to clean up underscored labels for screen display
+String formatLabelForDisplay(String rawLabel) {
+  String cleanLabel = rawLabel;
+  cleanLabel.replace("_", " ");
+  return cleanLabel;
+}
+
+// Helper to determine vibration duration (in ms) based on priority matrix
 unsigned long getVibrationDurationForSound(String label, String priorityClass = "") {
   String lowerLabel = label;
   lowerLabel.toLowerCase();
   String lowerClass = priorityClass;
   lowerClass.toLowerCase();
 
-  // Critical Priority (3 Seconds Vibration)
-  if (lowerClass == "critical" || lowerLabel.indexOf("fire") >= 0 || lowerLabel.indexOf("alarm") >= 0 || lowerLabel.indexOf("siren") >= 0) {
+  if (lowerClass == "critical" || lowerLabel.indexOf("fire") >= 0 || lowerLabel.indexOf("siren") >= 0 || lowerLabel.indexOf("fallen") >= 0) {
     return 3000;
-  }
-  // High Priority (2 Seconds Vibration)
-  else if (lowerClass == "high" || lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0 || lowerLabel.indexOf("car") >= 0 || lowerLabel.indexOf("horn") >= 0) {
+  } 
+  else if (lowerClass == "high" || lowerLabel.indexOf("glass") >= 0 || lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0 || lowerLabel.indexOf("horn") >= 0 || lowerLabel.indexOf("car") >= 0 || lowerLabel.indexOf("bark") >= 0 || lowerLabel.indexOf("dog") >= 0) {
     return 2000;
-  }
-  // Medium / Low Priority (1 Second Vibration)
+  } 
   else {
     return 1000;
   }
 }
 
+// ================= SUPABASE ALERT UPLOADER =================
+void sendAlertToDatabase(String soundType, String alertType, char direction) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Supabase] WiFi disconnected. Alert upload skipped.");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(SUPABASE_ALERTS_ENDPOINT);
+  
+  // Required Headers for Supabase REST API
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
+  http.addHeader("Prefer", "return=minimal");
+
+  // Create JSON Payload
+  #if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonDocument doc;
+  #else
+    DynamicJsonDocument doc(256);
+  #endif
+
+  if (currentLoggedInUser.length() > 0 && currentLoggedInUser != "0") {
+    doc["user_id"] = currentLoggedInUser.toInt();
+  } else {
+    doc["user_id"] = nullptr;
+  }
+  
+  doc["sound_type"] = soundType;
+  doc["alert_type"] = alertType;
+  doc["status"]     = "unread";
+
+  // Convert single character direction into string format
+  String fullDirection = "None";
+  if (direction == 'L') fullDirection = "Left";
+  else if (direction == 'R') fullDirection = "Right";
+
+  JsonObject metadata = doc.createNestedObject("metadata");
+  metadata["direction"] = fullDirection;
+  metadata["source"]    = "sonoband_esp32";
+
+  String jsonPayload;
+  serializeJson(doc, jsonPayload);
+
+  Serial.printf("[Supabase] Uploading Alert: %s\n", jsonPayload.c_str());
+
+  int httpCode = http.POST(jsonPayload);
+
+  if (httpCode == 201 || httpCode == 200) {
+    Serial.printf("[Supabase] Success! Inserted alert into table. Code: %d\n", httpCode);
+  } else {
+    Serial.printf("[Supabase] Upload Failed! HTTP Code: %d | Response: %s\n", httpCode, http.getString().c_str());
+  }
+
+  http.end();
+}
+
 // ================= EDGE IMPULSE CALLBACK & INFERENCE =================
-// [FIX A APPLIED]: Gain multiplier (3.5x) to amplify quiet INMP441 audio
 int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
-  float gain = 3.5f; 
   for (size_t i = 0; i < length; i++) {
-    float sample = ((float)monoSendBuffer[offset + i] / 32768.0f) * gain;
-    
-    // Clamp output within float bounds [-1.0, 1.0] to prevent audio clipping distortion
-    if (sample > 1.0f) sample = 1.0f;
-    if (sample < -1.0f) sample = -1.0f;
-    
-    out_ptr[i] = sample;
+    out_ptr[i] = (float)inferenceBuffer[offset + i];
   }
   return 0;
 }
@@ -141,6 +227,10 @@ String classifyAudioBufferOnDevice(String &outPriorityClass) {
   signal.get_data = &raw_feature_get_data;
 
   ei_impulse_result_t result = { 0 };
+
+  // Explicit heap check before running TFLite classifier
+  Serial.printf("[SYSTEM] Free Heap before inference: %d Bytes\n", ESP.getFreeHeap());
+
   EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
 
   if (r != EI_IMPULSE_OK) {
@@ -148,7 +238,6 @@ String classifyAudioBufferOnDevice(String &outPriorityClass) {
     return "";
   }
 
-  // Find predicted sound class with highest confidence score
   float maxConfidence = 0.0f;
   int topClassIdx = -1;
 
@@ -161,32 +250,102 @@ String classifyAudioBufferOnDevice(String &outPriorityClass) {
     }
   }
 
-  // [FIX B APPLIED]: Adjusted threshold to 0.50f (50% confidence)
-  if (topClassIdx >= 0 && maxConfidence >= 0.50f) {
+  if (topClassIdx >= 0) {
     String detectedLabel = String(result.classification[topClassIdx].label);
-    
-    // Ignore ambient/background/noise labels if present in dataset
-    if (detectedLabel != "noise" && detectedLabel != "background" && detectedLabel != "z_noise" && detectedLabel != "unknown") {
-      Serial.printf("[TINYML] Verified Sound: %s (Confidence: %.2f%%)\n", 
-                    detectedLabel.c_str(), maxConfidence * 100.0f);
+    String lowerLabel = detectedLabel;
+    lowerLabel.toLowerCase();
 
-      String lower = detectedLabel;
-      lower.toLowerCase();
+    float requiredConfidence = 0.40f;
 
-      if (lower.indexOf("fire") >= 0 || lower.indexOf("alarm") >= 0 || lower.indexOf("siren") >= 0) {
-        outPriorityClass = "critical";
-      } else if (lower.indexOf("baby") >= 0 || lower.indexOf("cry") >= 0 || lower.indexOf("car") >= 0 || lower.indexOf("horn") >= 0) {
-        outPriorityClass = "high";
-      } else {
-        outPriorityClass = "medium";
+    if (lowerLabel.indexOf("knock") >= 0 || lowerLabel.indexOf("glass") >= 0 || lowerLabel.indexOf("fallen") >= 0) {
+      requiredConfidence = 0.25f;
+    } else if (lowerLabel.indexOf("bark") >= 0 || lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0 || lowerLabel.indexOf("speech") >= 0 || lowerLabel.indexOf("doorbell") >= 0 || lowerLabel.indexOf("phone") >= 0) {
+      requiredConfidence = 0.30f;
+    } else if (lowerLabel.indexOf("siren") >= 0 || lowerLabel.indexOf("alarm") >= 0 || lowerLabel.indexOf("horn") >= 0 || lowerLabel.indexOf("fire") >= 0) {
+      requiredConfidence = 0.35f;
+    }
+
+    // Check if the prediction meets the threshold
+    if (maxConfidence >= requiredConfidence) {
+      if (detectedLabel != "noise" && detectedLabel != "background" && detectedLabel != "z_noise" && detectedLabel != "unknown") {
+        Serial.printf("[TINYML] Verified Sound: %s (Confidence: %.2f%% | Required: %.2f%%)\n", 
+                      detectedLabel.c_str(), maxConfidence * 100.0f, requiredConfidence * 100.0f);
+
+        if (lowerLabel.indexOf("fire") >= 0 || lowerLabel.indexOf("siren") >= 0 || lowerLabel.indexOf("fallen") >= 0) {
+          outPriorityClass = "critical";
+        } else if (lowerLabel.indexOf("glass") >= 0 || lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0 || lowerLabel.indexOf("horn") >= 0 || lowerLabel.indexOf("car") >= 0 || lowerLabel.indexOf("bark") >= 0 || lowerLabel.indexOf("dog") >= 0) {
+          outPriorityClass = "high";
+        } else if (lowerLabel.indexOf("doorbell") >= 0 || lowerLabel.indexOf("bell") >= 0 || lowerLabel.indexOf("clock") >= 0) {
+          outPriorityClass = "medium";
+        } else {
+          outPriorityClass = "low";
+        }
+
+        return detectedLabel;
       }
-
-      return detectedLabel;
     }
   }
 
-  Serial.printf("[TINYML] Below confidence threshold (Highest: %.2f%%)\n", maxConfidence * 100.0f);
+  Serial.printf("[TINYML] Below adaptive confidence threshold (Highest: %.2f%%)\n", maxConfidence * 100.0f);
   return "";
+}
+
+// ================= FREERTOS CORE 0 AUDIO SAMPLING TASK =================
+void audioTask(void *pvParameters) {
+  int localAccumIndex = 0;
+  long peakLeft = 0;
+  long peakRight = 0;
+
+  for (;;) {
+    if (deviceOn) {
+      size_t bytesRead = 0;
+      i2s_read(I2S_PORT, &i2sRawBuffer, sizeof(i2sRawBuffer), &bytesRead, portMAX_DELAY);
+
+      int samplesRead = bytesRead / 4;
+
+      for (int i = 0; i < samplesRead; i += 2) {
+        int16_t leftSample  = (int16_t)(((i2sRawBuffer[i] >> 14)) * micLeftGain);
+        int16_t rightSample = (int16_t)(((i2sRawBuffer[i + 1] >> 14)) * micRightGain);
+
+        long absLeft = abs(leftSample);
+        long absRight = abs(rightSample);
+
+        if (absLeft > peakLeft) peakLeft = absLeft;
+        if (absRight > peakRight) peakRight = absRight;
+
+        if (localAccumIndex < AUDIO_ACCUM_SIZE) {
+          monoSendBuffer[localAccumIndex++] = (int16_t)((leftSample + rightSample) / 2);
+        }
+      }
+
+      if (localAccumIndex >= AUDIO_ACCUM_SIZE) {
+        long sumEnergy = 0;
+        for (int k = 0; k < AUDIO_ACCUM_SIZE; k += 16) {
+          int32_t val = monoSendBuffer[k];
+          sumEnergy += (val * val) / 1000;
+        }
+        long avgEnergy = sumEnergy / (AUDIO_ACCUM_SIZE / 16);
+
+        AudioFrameMeta meta;
+        meta.peakLeft = peakLeft;
+        meta.peakRight = peakRight;
+        meta.avgEnergy = avgEnergy;
+
+        xQueueOverwrite(audioQueue, &meta);
+
+        localAccumIndex = 0;
+        peakLeft = 0;
+        peakRight = 0;
+
+        i2s_zero_dma_buffer(I2S_PORT);
+      }
+    } else {
+      localAccumIndex = 0;
+      peakLeft = 0;
+      peakRight = 0;
+      vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+  }
 }
 
 // ================= FUNCTION PROTOTYPES =================
@@ -206,12 +365,17 @@ void applyCORS();
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n=== SONOBAND ESP32 INITIALIZING (EDGE AI ENABLED) ===");
+  Serial.println("\n=== SONOBAND ESP32 INITIALIZING (DUAL-CORE FREERTOS ENABLED) ===");
 
-  pinMode(VIB_MOTOR_PIN, OUTPUT);
-  analogWrite(VIB_MOTOR_PIN, 0);
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  ledcAttach(VIB_MOTOR_PIN, VIB_PWM_FREQ, VIB_PWM_RES);
+  ledcWrite(VIB_MOTOR_PIN, 0);
+#else
+  ledcSetup(VIB_PWM_CHANNEL, VIB_PWM_FREQ, VIB_PWM_RES);
+  ledcAttachPin(VIB_MOTOR_PIN, VIB_PWM_CHANNEL);
+  ledcWrite(VIB_MOTOR_PIN, 0);
+#endif
 
-  // Initialize Screen
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
   tft.initR(INITR_MINI160x80); 
   tft.invertDisplay(false); 
@@ -220,8 +384,9 @@ void setup() {
   drawWelcomeScreen();
   delay(1500);
 
-  // Initialize Dual-Mic I2S Hardware Driver
   setupI2S();
+
+  Serial.printf("[SYSTEM] Free Internal Heap: %d Bytes\n", ESP.getFreeHeap());
 
   drawWaitingScreen("Connecting WiFi...");
   WiFi.begin(ssid, password);
@@ -242,6 +407,18 @@ void setup() {
 
   lastHeartbeat = millis(); 
 
+  audioQueue = xQueueCreate(1, sizeof(AudioFrameMeta));
+
+  xTaskCreatePinnedToCore(
+    audioTask,
+    "AudioTask",
+    4096, // Optimized stack allocation to conserve continuous RAM
+    NULL,
+    1,
+    &audioTaskHandle,
+    0
+  );
+
   deviceOn = false;
   isConnectedToApp = false;
   drawWaitingForAppScreen();
@@ -255,8 +432,8 @@ void setupI2S() {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 512,
+    .dma_buf_count = 6,
+    .dma_buf_len = 256,
     .use_apll = false,
     .tx_desc_auto_clear = false,
     .fixed_mclk = 0
@@ -334,7 +511,7 @@ void setupHttpEndpoints() {
       #if ARDUINOJSON_VERSION_MAJOR >= 7
         JsonDocument doc;
       #else
-        DynamicJsonDocument doc(3072);
+        DynamicJsonDocument doc(256); // Downsized from 3072 to avoid heap memory fragmentation
       #endif
       DeserializationError err = deserializeJson(doc, body);
       if (!err) {
@@ -364,9 +541,9 @@ void setupHttpEndpoints() {
           updateFullDisplay(currentDisplayLabel, 'N'); 
         }
 
-        // --- VIBRATION SENSITIVITY MAPPING ---
         if (doc.containsKey("vibration_intensity")) {
           String vib = doc["vibration_intensity"].as<String>();
+          vib.toLowerCase();
           if (vib == "low") {
             vibrationPwmValue = 120;
           } else if (vib == "medium") {
@@ -374,16 +551,18 @@ void setupHttpEndpoints() {
           } else { 
             vibrationPwmValue = 255;
           }
+          Serial.printf("[CONFIG] Vibration set to %s (PWM: %d)\n", vib.c_str(), vibrationPwmValue);
         }
 
-        // --- MICROPHONE SENSITIVITY MAPPING ---
         if (doc.containsKey("sensitivity") || doc.containsKey("sound_threshold")) {
           String sens = doc.containsKey("sensitivity") ? doc["sensitivity"].as<String>() : doc["sound_threshold"].as<String>();
+          sens.toLowerCase();
           if (sens == "broad" || sens == "wide") {
-            noiseFloor = 500;   // Broad listening: low peak threshold
+            noiseFloor = 200;
           } else { 
-            noiseFloor = 2500;  // Narrow listening: high peak threshold
+            noiseFloor = 600;
           }
+          Serial.printf("[CONFIG] Sensitivity set to %s (Noise Floor: %d)\n", sens.c_str(), noiseFloor);
         }
       }
     }
@@ -392,7 +571,7 @@ void setupHttpEndpoints() {
   });
 }
 
-// ================= MAIN LOOP =================
+// ================= MAIN LOOP (CORE 1) =================
 void loop() {
   httpServer.handleClient();
   updateVibration();
@@ -404,13 +583,11 @@ void loop() {
     }
   }
 
-  // Periodic Pong
   if (millis() - lastAnnounce > ANNOUNCE_INTERVAL) {
     sendHandshakeResponse();
     lastAnnounce = millis();
   }
 
-  // ON-DEVICE SOUND DETECTION & CLASSIFICATION
   if (deviceOn) {
     if (currentDisplayLabel != "Ready to Detect" && (millis() - displayResetTime > alertCooldown)) {
       currentDisplayLabel = "Ready to Detect";
@@ -419,64 +596,52 @@ void loop() {
       updateFullDisplay(currentDisplayLabel, currentDirectionChar);
     }
 
-    if (millis() - lastAlertTime < alertCooldown) return; 
+    AudioFrameMeta meta;
+    if (xQueueReceive(audioQueue, &meta, 0) == pdTRUE) {
+      long maxPeak = max(meta.peakLeft, meta.peakRight);
 
-    size_t bytesRead = 0;
-    i2s_read(I2S_PORT, &i2sRawBuffer, sizeof(i2sRawBuffer), &bytesRead, portMAX_DELAY);
+      if (maxPeak >= noiseFloor && meta.avgEnergy >= dynamicMinEnergy && (millis() - lastAlertTime >= alertCooldown)) {
+        
+        memcpy(inferenceBuffer, monoSendBuffer, sizeof(monoSendBuffer));
 
-    int samplesRead = bytesRead / 4;
-    long peakAmpLeft = 0;
-    long peakAmpRight = 0;
+        char winnerDir = 'N';
+        long ampDelta = abs(meta.peakRight - meta.peakLeft);
+        if (ampDelta >= DIRECTION_THRESHOLD_DIFF) {
+          winnerDir = (meta.peakRight > meta.peakLeft) ? 'R' : 'L';
+        }
 
-    for (int i = 0; i < samplesRead; i += 2) {
-      int16_t leftSample  = (int16_t)(i2sRawBuffer[i] >> 16);
-      int16_t rightSample = (int16_t)(i2sRawBuffer[i + 1] >> 16);
+        Serial.printf("[DEBUG] Peak L: %ld | R: %ld | Energy: %ld\n", meta.peakLeft, meta.peakRight, meta.avgEnergy);
 
-      long absLeft = abs(leftSample);
-      long absRight = abs(rightSample);
-
-      if (absLeft > peakAmpLeft) peakAmpLeft = absLeft;
-      if (absRight > peakAmpRight) peakAmpRight = absRight;
-
-      if (accumIndex < AUDIO_ACCUM_SIZE) {
-        monoSendBuffer[accumIndex++] = (int16_t)((leftSample + rightSample) / 2);
-      }
-    }
-
-    long maxPeak = max(peakAmpLeft, peakAmpRight);
-
-    if (maxPeak >= noiseFloor && accumIndex >= AUDIO_ACCUM_SIZE) {
-      char winnerDir = (peakAmpRight > peakAmpLeft) ? 'R' : 'L';
-
-      currentDisplayLabel = "Analyzing...";
-      currentDirectionChar = winnerDir;
-      updateFullDisplay(currentDisplayLabel, currentDirectionChar);
-
-      // --- EXECUTE LOCAL TINYML INFERENCE ---
-      String detectedPriorityClass = "";
-      String detectedSound = classifyAudioBufferOnDevice(detectedPriorityClass);
-
-      if (detectedSound.length() > 0) {
-        activeSoundType = detectedSound;
-        currentDisplayLabel = detectedSound;
+        currentDisplayLabel = "Analyzing...";
         currentDirectionChar = winnerDir;
         updateFullDisplay(currentDisplayLabel, currentDirectionChar);
 
-        unsigned long vibDuration = getVibrationDurationForSound(detectedSound, detectedPriorityClass);
-        alertCooldown = vibDuration;
-        displayResetTime = millis();
-        lastAlertTime = millis();
+        String detectedPriorityClass = "";
+        String detectedSound = classifyAudioBufferOnDevice(detectedPriorityClass);
 
-        triggerVibration(vibrationPwmValue, vibDuration);
-      } else {
-        currentDisplayLabel = "Ready to Detect";
-        currentDirectionChar = 'N';
-        updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+        // TRIGGER CONDITION: Runs when TinyML meets confidence threshold and returns non-empty label
+        if (detectedSound.length() > 0) {
+          String cleanSoundLabel = formatLabelForDisplay(detectedSound);
+          activeSoundType = cleanSoundLabel;
+          currentDisplayLabel = cleanSoundLabel;
+          currentDirectionChar = winnerDir;
+          updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+
+          unsigned long vibDuration = getVibrationDurationForSound(cleanSoundLabel, detectedPriorityClass);
+          alertCooldown = vibDuration;
+          displayResetTime = millis();
+          lastAlertTime = millis();
+
+          triggerVibration(vibrationPwmValue, vibDuration);
+
+          // Upload detection event directly to Supabase
+          sendAlertToDatabase(detectedSound, detectedPriorityClass, winnerDir);
+        } else {
+          currentDisplayLabel = "Ready to Detect";
+          currentDirectionChar = 'N';
+          updateFullDisplay(currentDisplayLabel, currentDirectionChar);
+        }
       }
-
-      accumIndex = 0; 
-    } else if (accumIndex >= AUDIO_ACCUM_SIZE) {
-      accumIndex = 0; 
     }
   } else if (!showingConnectScreen && isConnectedToApp) {
     drawOffScreen();
@@ -498,14 +663,22 @@ void sendHandshakeResponse() {
 }
 
 void triggerVibration(int pwm, unsigned long durationMs) {
-  analogWrite(VIB_MOTOR_PIN, pwm);
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  ledcWrite(VIB_MOTOR_PIN, pwm);
+#else
+  ledcWrite(VIB_PWM_CHANNEL, pwm);
+#endif
   vibOffTime = millis() + durationMs;
   isVibrating = true;
 }
 
 void updateVibration() {
   if (isVibrating && millis() >= vibOffTime) {
-    analogWrite(VIB_MOTOR_PIN, 0);
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    ledcWrite(VIB_MOTOR_PIN, 0);
+#else
+    ledcWrite(VIB_PWM_CHANNEL, 0);
+#endif
     isVibrating = false;
   }
 }
@@ -603,19 +776,19 @@ void updateFullDisplay(String label, char dir) {
   String lowerLabel = label;
   lowerLabel.toLowerCase();
 
-  if (lowerLabel.indexOf("siren") >= 0 || lowerLabel.indexOf("alarm") >= 0) {
+  if (lowerLabel.indexOf("siren") >= 0 || lowerLabel.indexOf("fire") >= 0 || lowerLabel.indexOf("alarm") >= 0) {
     selectedIcon = epd_bitmap_ic_siren;
   } else if (lowerLabel.indexOf("bark") >= 0 || lowerLabel.indexOf("dog") >= 0) {
     selectedIcon = epd_bitmap_ic_barking;
-  } else if (lowerLabel.indexOf("bell") >= 0 || lowerLabel.indexOf("door") >= 0 || lowerLabel.indexOf("knock") >= 0) {
+  } else if (lowerLabel.indexOf("doorbell") >= 0 || lowerLabel.indexOf("bell") >= 0 || lowerLabel.indexOf("knock") >= 0) {
     selectedIcon = epd_bitmap_ic_doorbell;
   } else if (lowerLabel.indexOf("baby") >= 0 || lowerLabel.indexOf("cry") >= 0) {
     selectedIcon = epd_bitmap_ic_baby;
   } else if (lowerLabel.indexOf("car") >= 0 || lowerLabel.indexOf("horn") >= 0 || lowerLabel.indexOf("traffic") >= 0) {
     selectedIcon = epd_bitmap_ic_car;
-  } else if (lowerLabel.indexOf("speech") >= 0 || lowerLabel.indexOf("talk") >= 0 || lowerLabel.indexOf("voice") >= 0 || lowerLabel.indexOf("calling") >= 0) {
+  } else if (lowerLabel.indexOf("speech") >= 0 || lowerLabel.indexOf("talk") >= 0 || lowerLabel.indexOf("voice") >= 0) {
     selectedIcon = epd_bitmap_ic_speech;
-  } else if (lowerLabel.indexOf("alert") >= 0 || lowerLabel.indexOf("loud") >= 0) {
+  } else if (lowerLabel.indexOf("glass") >= 0 || lowerLabel.indexOf("fallen") >= 0 || lowerLabel.indexOf("object") >= 0 || lowerLabel.indexOf("phone") >= 0) {
     selectedIcon = epd_bitmap_ic_alert;
   }
 
@@ -635,14 +808,14 @@ void updateFullDisplay(String label, char dir) {
 
   tft.setTextSize(2); 
   if (dir == 'L') {
-    tft.setCursor(48, 48);
-    tft.print("<- LEFT");
+    tft.setCursor(48, 48);  
+    tft.print("<- Left");
   } else if (dir == 'R') {
     tft.setCursor(44, 48);
-    tft.print("RIGHT ->");
+    tft.print("Right ->");
   } else {  
     tft.setTextSize(1);
     tft.setCursor(40, 52);  
-    tft.print("[ Ready to Detect ]");
+    tft.print("[ Ready to Detect ]"); 
   }
 }

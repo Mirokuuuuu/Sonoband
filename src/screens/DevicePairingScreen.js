@@ -379,44 +379,65 @@ export default function DevicePairingScreen({
             data={pairedDevices}
             keyExtractor={(item) => String(item.id)}
             contentContainerStyle={styles.flatListContent}
-            renderItem={({ item }) => (
-              <View style={styles.deviceCard}>
-                <TouchableOpacity
-                  style={styles.deviceTouchArea}
-                  onPress={() => handleConnectSavedDevice(item)}
+            renderItem={({ item }) => {
+              const isCurrentlyConnected =
+                syncState === 'SUCCESS' &&
+                deviceIp &&
+                item.ip_address &&
+                deviceIp === item.ip_address;
+
+              return (
+                <View
+                  style={[
+                    styles.deviceCard,
+                    isCurrentlyConnected && styles.connectedDeviceCard,
+                  ]}
                 >
-                  <MaterialCommunityIcons
-                    name={item.is_on ? 'shield-check' : 'shield-outline'}
-                    size={24}
-                    color={item.is_on ? '#4ADE80' : '#64748B'}
-                  />
-                  <View style={styles.deviceInfo}>
-                    <Text style={styles.deviceName}>{item.device_name}</Text>
-                    <Text style={styles.deviceSubText}>
-                      {`IP: ${item.ip_address ? item.ip_address : 'Unconfigured'} | State: ${
-                        item.is_on ? 'Active' : 'Standby'
-                      }`}
-                    </Text>
+                  <TouchableOpacity
+                    style={styles.deviceTouchArea}
+                    onPress={() => handleConnectSavedDevice(item)}
+                  >
+                    <MaterialCommunityIcons
+                      name={item.is_on ? 'shield-check' : 'shield-outline'}
+                      size={24}
+                      color={item.is_on ? '#4ADE80' : '#64748B'}
+                    />
+                    <View style={styles.deviceInfo}>
+                      <View style={styles.deviceNameRow}>
+                        <Text style={styles.deviceName}>{item.device_name}</Text>
+                        {isCurrentlyConnected && (
+                          <View style={styles.connectedBadge}>
+                            <View style={styles.connectedDot} />
+                            <Text style={styles.connectedBadgeText}>CONNECTED</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.deviceSubText}>
+                        {`IP: ${item.ip_address ? item.ip_address : 'Unconfigured'} | State: ${
+                          item.is_on ? 'Active' : 'Standby'
+                        }`}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  <View style={styles.actionIconButtonRow}>
+                    <TouchableOpacity
+                      style={styles.actionIconButton}
+                      onPress={() => handleDisconnectDevice(item)}
+                    >
+                      <MaterialCommunityIcons name="link-off" size={20} color="#F59E0B" />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.actionIconButton}
+                      onPress={() => handleForgetDevice(item.id)}
+                    >
+                      <MaterialCommunityIcons name="trash-can-outline" size={20} color="#EF4444" />
+                    </TouchableOpacity>
                   </View>
-                </TouchableOpacity>
-
-                <View style={styles.actionIconButtonRow}>
-                  <TouchableOpacity
-                    style={styles.actionIconButton}
-                    onPress={() => handleDisconnectDevice(item)}
-                  >
-                    <MaterialCommunityIcons name="link-off" size={20} color="#F59E0B" />
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.actionIconButton}
-                    onPress={() => handleForgetDevice(item.id)}
-                  >
-                    <MaterialCommunityIcons name="trash-can-outline" size={20} color="#EF4444" />
-                  </TouchableOpacity>
                 </View>
-              </View>
-            )}
+              );
+            }}
             ListEmptyComponent={
               <Text style={styles.emptyText}>No saved devices found for this account.</Text>
             }
@@ -524,11 +545,41 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     marginBottom: 8,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  connectedDeviceCard: {
+    borderColor: '#4ADE80',
+    backgroundColor: '#16243B',
   },
   deviceTouchArea: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   deviceInfo: { flex: 1, marginLeft: 12 },
+  deviceNameRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
   deviceName: { fontSize: 15, fontWeight: '600', color: '#FFF' },
-  deviceSubText: { fontSize: 12, color: '#64748B' },
+  connectedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(74, 222, 128, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#4ADE80',
+    gap: 4,
+  },
+  connectedDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4ADE80',
+  },
+  connectedBadgeText: {
+    color: '#4ADE80',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  deviceSubText: { fontSize: 12, color: '#64748B', marginTop: 2 },
   actionIconButtonRow: { flexDirection: 'row', alignItems: 'center' },
   actionIconButton: { padding: 6, marginLeft: 2 },
   emptyText: { color: '#64748B', fontStyle: 'italic', marginTop: 8 },

@@ -18,7 +18,7 @@ export default function DeviceControlScreen({
   navigation, 
   onNavigate, 
   userId, 
-  isDeviceOn, 
+  isDeviceOn = false, 
   setIsDeviceOn 
 }) {
   const [loading, setLoading] = useState(true);
@@ -27,14 +27,17 @@ export default function DeviceControlScreen({
   const [deviceIp, setDeviceIp] = useState(null);
   const [macAddress, setMacAddress] = useState(null);
 
-  // Device Settings State
-  const [devicePower, setDevicePower] = useState(isDeviceOn || false);
+  // Initial State synced safely from props
+  const [devicePower, setDevicePower] = useState(Boolean(isDeviceOn));
   const [vibrationLevel, setVibrationLevel] = useState('medium'); // 'low', 'medium', 'high'
   const [micRange, setMicRange] = useState('narrow'); // 'narrow', 'broad'
 
   // Initial loaded states to check if values changed on Save
   const [initialVibration, setInitialVibration] = useState('medium');
   const [initialMicRange, setInitialMicRange] = useState('narrow');
+
+  // Track initialization to avoid prop vs DB sync conflicts
+  const isInitialized = useRef(false);
 
   // Reference to background keep-alive ping interval
   const pingIntervalRef = useRef(null);
@@ -66,9 +69,9 @@ export default function DeviceControlScreen({
     fetchDeviceSettings();
   }, [userId]);
 
-  // Sync prop changes from parent components if available
+  // Sync prop changes ONLY after initial fetch completes
   useEffect(() => {
-    if (typeof isDeviceOn === 'boolean') {
+    if (isInitialized.current && typeof isDeviceOn === 'boolean') {
       setDevicePower(isDeviceOn);
     }
   }, [isDeviceOn]);
@@ -112,6 +115,7 @@ export default function DeviceControlScreen({
   const fetchDeviceSettings = async () => {
     if (!userId) {
       setLoading(false);
+      isInitialized.current = true;
       return;
     }
 
@@ -135,7 +139,7 @@ export default function DeviceControlScreen({
         setMacAddress(device.mac_address || null);
         setDeviceIp(device.ip_address || device.ip);
 
-        // Sync Power Status
+        // Sync Power Status directly from Database source of truth
         const isDbOn = Boolean(device.is_on);
         setDevicePower(isDbOn);
         if (typeof setIsDeviceOn === 'function') {
@@ -176,6 +180,7 @@ export default function DeviceControlScreen({
       console.error('Error loading device settings:', err);
     } finally {
       setLoading(false);
+      isInitialized.current = true;
     }
   };
 
@@ -452,6 +457,7 @@ export default function DeviceControlScreen({
                 <Text style={[styles.segmentText, micRange === 'broad' && styles.segmentTextActive]}>Broad</Text>
               </TouchableOpacity>
             </View>
+            
             <Text style={styles.rangeDescription}>
               {micRange === 'narrow'
                 ? 'Narrow: Focuses on prominent, nearby alerts and ignores distant noise.'
