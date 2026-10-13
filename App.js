@@ -1,10 +1,86 @@
 import 'react-native-get-random-values';
 import * as Crypto from 'expo-crypto';
 import React, { useState, useEffect, useCallback } from 'react';
-import { StyleSheet, ActivityIndicator } from 'react-native';
+import { StyleSheet, ActivityIndicator, Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo'; 
+import Constants, { ExecutionEnvironment } from 'expo-constants';
+import * as Device from 'expo-device';
 import { supabase } from './src/services/supabaseClient';
+
+// Safe dynamic loader for expo-notifications to prevent Expo Go SDK crashes
+let Notifications = null;
+const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
+
+if (!isExpoGo) {
+  try {
+    Notifications = require('expo-notifications');
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: true,
+      }),
+    });
+  } catch (e) {
+    console.log('[PUSH] Dynamic notifications import skipped.');
+  }
+}
+
+// Helper function to register device push token in Supabase public.users
+async function registerForPushNotificationsAsync(numericUserId) {
+  if (!numericUserId || isExpoGo || !Notifications) {
+    console.log('[PUSH] Skipping Push Registration in Expo Go environment.');
+    return;
+  }
+
+  try {
+    if (Device.isDevice) {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== 'granted') {
+        console.log('[PUSH] Permission for push notifications was denied.');
+        return;
+      }
+
+      const tokenObj = await Notifications.getExpoPushTokenAsync();
+      const token = tokenObj?.data;
+
+      if (token) {
+        console.log('[PUSH] Generated Expo Push Token:', token);
+        const { error } = await supabase
+          .from('users')
+          .update({ expo_push_token: token })
+          .eq('id', numericUserId);
+
+        if (error) {
+          console.error('[PUSH] Failed to update token in Supabase:', error.message);
+        } else {
+          console.log('[PUSH] Token successfully saved to Supabase user account!');
+        }
+      }
+    } else {
+      console.log('[PUSH] Must run on physical hardware device for Push Notifications.');
+    }
+
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'default',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#38BDF8',
+      });
+    }
+  } catch (err) {
+    console.warn('[PUSH] Push notifications setup error:', err.message);
+  }
+}
 
 // Authentication Screens
 import LoginScreen from './src/screens/LoginScreen';
@@ -113,6 +189,9 @@ export default function App() {
         setUserId(resolvedId);
         setUserRole(resolvedRole);
 
+        // Safely trigger push notification registration
+        registerForPushNotificationsAsync(resolvedId);
+
         return { id: resolvedId, role: resolvedRole };
       }
 
@@ -142,6 +221,7 @@ export default function App() {
       } else {
         setUserId(numericId);
         setUserRole(resolvedRole);
+        registerForPushNotificationsAsync(numericId);
       }
     } catch (err) {
       console.log('Login event setup skipped:', err.message);
@@ -254,7 +334,9 @@ export default function App() {
         return (
           <ForgotPasswordScreen 
             navigation={navigationAdapter}
-            onNavigate={() => handleNavigate(forgotPasswordSource)} 
+            onNavigate={handleNavigate}
+            userId={userId}
+            isLoggedIn={Boolean(userId)}
           />
         );
 

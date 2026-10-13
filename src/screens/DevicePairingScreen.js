@@ -188,7 +188,34 @@ export default function DevicePairingScreen({
               onDisconnectDevice();
             }
 
-            await logSystemActivity(userId, 'DISCONNECT_DEVICE', `Disconnected device ID: ${device.id}`);
+            // Query database for user details matching schema
+            let fetchedName = null;
+            let fetchedEmail = null;
+            let fetchedRole = 'user';
+
+            if (isValidUserId(userId)) {
+              const query = !isNaN(Number(userId))
+                ? supabase.from('users').select('id, name, email, role').eq('id', Number(userId))
+                : supabase.from('users').select('id, name, email, role').eq('uuid', String(userId));
+
+              const { data: userData } = await query.maybeSingle();
+
+              if (userData) {
+                fetchedName = userData.name || userData.email;
+                fetchedEmail = userData.email;
+                fetchedRole = userData.role || 'user';
+              }
+            }
+
+            // Log activity with explicit user credentials
+            await logSystemActivity(
+              userId,
+              'DISCONNECT_DEVICE',
+              `Disconnected device ID: ${device.id}`,
+              fetchedName,
+              fetchedEmail,
+              fetchedRole
+            );
 
             await createNotification(
               'device_registration',
@@ -232,7 +259,34 @@ export default function DevicePairingScreen({
               onDisconnectDevice();
             }
 
-            await logSystemActivity(userId, 'FORGET_DEVICE', `Removed device ID: ${deviceId}`);
+            // Query database for user details matching schema
+            let fetchedName = null;
+            let fetchedEmail = null;
+            let fetchedRole = 'user';
+
+            if (isValidUserId(userId)) {
+              const query = !isNaN(Number(userId))
+                ? supabase.from('users').select('id, name, email, role').eq('id', Number(userId))
+                : supabase.from('users').select('id, name, email, role').eq('uuid', String(userId));
+
+              const { data: userData } = await query.maybeSingle();
+
+              if (userData) {
+                fetchedName = userData.name || userData.email;
+                fetchedEmail = userData.email;
+                fetchedRole = userData.role || 'user';
+              }
+            }
+
+            await logSystemActivity(
+              userId,
+              'FORGET_DEVICE',
+              `Removed device ID: ${deviceId}`,
+              fetchedName,
+              fetchedEmail,
+              fetchedRole
+            );
+
             Alert.alert('Device Removed', 'Device deleted successfully.');
             fetchPairedDevices();
           } catch (err) {

@@ -19,7 +19,6 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
   const activeUserId = userId || route?.params?.userId;
 
   const [patientCount, setPatientCount] = useState(0);
-  const [activeAlertCount, setActiveAlertCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -37,7 +36,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
     try {
       if (!activeUserId) return;
 
-      // 1. Fetch Assigned Patients Count
+      // Fetch Assigned Patients Count
       const { count: patients, error: patientError } = await supabase
         .from('caregiver_links')
         .select('id', { count: 'exact', head: true })
@@ -45,26 +44,6 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
 
       if (!patientError && patients !== null) {
         setPatientCount(patients);
-      }
-
-      // 2. Fetch linked patient IDs
-      const { data: links } = await supabase
-        .from('caregiver_links')
-        .select('patient_id')
-        .eq('caregiver_id', activeUserId);
-
-      const patientIds = (links || []).map((link) => link.patient_id);
-      const targetUserIds = [activeUserId, ...patientIds];
-
-      // 3. Fetch Active Unread Notifications/Alerts
-      const { count: alerts, error: alertError } = await supabase
-        .from('notifications')
-        .select('id', { count: 'exact', head: true })
-        .in('user_id', targetUserIds)
-        .eq('is_read', false);
-
-      if (!alertError && alerts !== null) {
-        setActiveAlertCount(alerts);
       }
     } catch (err) {
       console.error('Error fetching caregiver metrics:', err.message);
@@ -81,7 +60,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
       .channel('caregiver_dashboard_updates')
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'notifications' },
+        { event: '*', schema: 'public', table: 'caregiver_links' },
         () => fetchDashboardMetrics()
       )
       .subscribe();
@@ -96,7 +75,6 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
     fetchDashboardMetrics();
   };
 
-  // Mirrored exact execution logic from SettingsScreen.js
   const executeLogout = async () => {
     try {
       if (activeUserId && supabase) {
@@ -107,22 +85,18 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
           .maybeSingle();
 
         try {
-          const { error: insertErr } = await supabase
-            .from('audit_logs')
-            .insert([
-              {
-                user_id: activeUserId,
-                user_name: userData?.name || userData?.email || 'Caregiver',
-                user_email: userData?.email || '',
-                role: userData?.role || 'caregiver',
-                action: 'Logout',
-                details: 'Caregiver logged out of application',
-                ip_address: Platform.OS === 'ios' ? 'iOS Device' : 'Mobile Client',
-                created_at: new Date().toISOString(),
-              },
-            ]);
-
-          if (insertErr) console.log('Audit log insert note:', insertErr.message);
+          await supabase.from('audit_logs').insert([
+            {
+              user_id: activeUserId,
+              user_name: userData?.name || userData?.email || 'Caregiver',
+              user_email: userData?.email || '',
+              role: userData?.role || 'caregiver',
+              action: 'Logout',
+              details: 'Caregiver logged out of application',
+              ip_address: Platform.OS === 'ios' ? 'iOS Device' : 'Mobile Client',
+              created_at: new Date().toISOString(),
+            },
+          ]);
         } catch (insertErr) {
           console.log('Audit log write skipped:', insertErr.message);
         }
@@ -194,28 +168,13 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
             style={styles.statCard}
             onPress={() => navigateTo('assignedPatients')}
           >
-            <Feather name="users" size={24} color="#06B6D4" />
+            <Feather name="users" size={26} color="#06B6D4" />
             {loading ? (
               <ActivityIndicator color="#06B6D4" style={{ marginVertical: 6 }} />
             ) : (
               <Text style={styles.statNumber}>{patientCount}</Text>
             )}
             <Text style={styles.statLabel}>Assigned Patients</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.statCard}
-            onPress={() => navigateTo('caregiverNotifications')}
-          >
-            <Feather name="alert-triangle" size={24} color="#EF4444" />
-            {loading ? (
-              <ActivityIndicator color="#EF4444" style={{ marginVertical: 6 }} />
-            ) : (
-              <Text style={[styles.statNumber, activeAlertCount > 0 && { color: '#EF4444' }]}>
-                {activeAlertCount}
-              </Text>
-            )}
-            <Text style={styles.statLabel}>Active Alerts</Text>
           </TouchableOpacity>
         </View>
 
@@ -265,7 +224,7 @@ export default function CaregiverDashboard({ navigation, onNavigate, userId, rou
         </TouchableOpacity>
       </ScrollView>
 
-      {/* Centered Bottom Navigation Bar */}
+      {/* Bottom Navigation Bar */}
       <View style={styles.bottomNav}>
         <TouchableOpacity
           style={styles.navItem}
@@ -325,18 +284,17 @@ const styles = StyleSheet.create({
   iconButton: { padding: 8, borderRadius: 10, backgroundColor: '#334155' },
   logoutButton: { backgroundColor: '#EF444415', marginLeft: 8, borderWidth: 1, borderColor: '#EF444430' },
   scrollContent: { padding: 16, paddingBottom: 90 },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, gap: 12 },
+  statsRow: { marginBottom: 20 },
   statCard: {
-    flex: 1,
     backgroundColor: '#1E293B',
     borderRadius: 14,
-    padding: 16,
+    padding: 20,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#334155',
   },
-  statNumber: { fontSize: 22, fontWeight: '800', color: '#F8FAFC', marginVertical: 4 },
-  statLabel: { fontSize: 12, color: '#94A3B8', textAlign: 'center' },
+  statNumber: { fontSize: 26, fontWeight: '800', color: '#F8FAFC', marginVertical: 4 },
+  statLabel: { fontSize: 13, color: '#94A3B8', textAlign: 'center', fontWeight: '600' },
   sectionTitle: { fontSize: 16, fontWeight: '700', color: '#F8FAFC', marginBottom: 12 },
   actionCard: {
     flexDirection: 'row',
@@ -378,7 +336,7 @@ const styles = StyleSheet.create({
   navItem: {
     flex: 1,
     alignItems: 'center',
-    justify: 'center',
+    justifyContent: 'center',
     paddingVertical: 6,
   },
   navText: {

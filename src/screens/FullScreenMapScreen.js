@@ -14,7 +14,6 @@ import { Ionicons } from '@expo/vector-icons';
 import Header from '../components/Header';
 import { supabase, logSystemActivity } from '../services/supabaseClient';
 
-// Clean Leaflet HTML template without inline variables
 const MAP_HTML = `
 <!DOCTYPE html>
 <html>
@@ -114,7 +113,10 @@ const MAP_HTML = `
 export default function FullscreenMapScreen({ navigation }) {
   const webViewRef = useRef(null);
   const [coords, setCoords] = useState({ latitude: 14.5995, longitude: 120.9842 });
-  const [userName, setUserName] = useState('User Location');
+  const [userName, setUserName] = useState('');
+  const [userEmail, setUserEmail] = useState(null);
+  const [userRole, setUserRole] = useState('user');
+  const [numericUserId, setNumericUserId] = useState(null);
   const [locationName, setLocationName] = useState('Fetching address...');
   const [loading, setLoading] = useState(false);
   const [isMapReady, setIsMapReady] = useState(false);
@@ -128,7 +130,7 @@ export default function FullscreenMapScreen({ navigation }) {
 
   useEffect(() => {
     if (isMapReady) {
-      sendDataToMap(coords.latitude, coords.longitude, userName, locationName);
+      sendDataToMap(coords.latitude, coords.longitude, userName || 'User', locationName);
     }
   }, [coords, userName, locationName, isMapReady]);
 
@@ -144,7 +146,7 @@ export default function FullscreenMapScreen({ navigation }) {
   };
 
   const locateUserOnly = () => {
-    sendDataToMap(coords.latitude, coords.longitude, userName, locationName);
+    sendDataToMap(coords.latitude, coords.longitude, userName || 'User', locationName);
   };
 
   const fetchUserAndLocation = async (isManualRefresh = false) => {
@@ -158,21 +160,33 @@ export default function FullscreenMapScreen({ navigation }) {
         return;
       }
 
-      let fetchedName = 'User';
+      let fetchedName = null;
+      let fetchedEmail = user.email || null;
+      let fetchedRole = 'user';
       let phoneNum = null;
-      let numericUserId = null;
+      let fetchedNumericId = null;
 
       const { data: userData } = await supabase
         .from('users')
-        .select('id, name, email, phone_number')
-        .eq('uuid', user.id)
+        .select('id, name, email, role, phone_number')
+        .or(`uuid.eq.${user.id},id.eq.${user.id}`)
         .maybeSingle();
 
       if (userData) {
-        fetchedName = userData.name || userData.email || 'User';
+        fetchedName = userData.name || userData.email;
+        fetchedEmail = userData.email || user.email;
+        fetchedRole = userData.role || 'user';
         phoneNum = userData.phone_number || null;
-        numericUserId = userData.id;
+        fetchedNumericId = userData.id;
+
         setUserName(fetchedName);
+        setUserEmail(fetchedEmail);
+        setUserRole(fetchedRole);
+        setNumericUserId(fetchedNumericId);
+      } else {
+        fetchedName = user.user_metadata?.full_name || user.email;
+        setUserName(fetchedName);
+        setUserEmail(fetchedEmail);
       }
 
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -208,6 +222,7 @@ export default function FullscreenMapScreen({ navigation }) {
       setLocationName(addressString);
 
       const nowIso = new Date().toISOString();
+
       await supabase
         .from('user_locations')
         .upsert({
@@ -223,9 +238,9 @@ export default function FullscreenMapScreen({ navigation }) {
         }, { onConflict: 'user_id' });
 
       if (isManualRefresh) {
-        if (numericUserId) {
+        if (fetchedNumericId) {
           await supabase.from('notifications').insert([{
-            user_id: Number(numericUserId),
+            user_id: Number(fetchedNumericId),
             notification_type: 'location_update',
             title: 'Location Updated',
             message: `Updated location to: ${addressString}`,
@@ -238,13 +253,15 @@ export default function FullscreenMapScreen({ navigation }) {
         if (typeof logSystemActivity === 'function') {
           try {
             await logSystemActivity(
-              user.id,
+              fetchedNumericId || user.id,
               'location_update',
               `Updated location: ${addressString}`,
-              { latitude, longitude, address: addressString }
+              fetchedName,
+              fetchedEmail,
+              fetchedRole
             );
           } catch (aErr) {
-            console.log('Audit log skipped:', aErr.message);
+            console.log('Audit log error:', aErr.message);
           }
         }
 
@@ -262,19 +279,17 @@ export default function FullscreenMapScreen({ navigation }) {
     <SafeAreaView style={styles.container}>
       <Header title="Fullscreen GPS Tracking" showBack={true} navigation={navigation} />
 
-      {/* TOP USER BADGE BAR */}
       <View style={styles.topInfoCard}>
         <View style={styles.badgeIconBox}>
           <Ionicons name="location-sharp" size={20} color="#38BDF8" />
         </View>
         <View style={{ marginLeft: 10, flex: 1 }}>
-          <Text style={styles.pinText}>{userName}</Text>
+          <Text style={styles.pinText}>{userName || 'User Location'}</Text>
           <Text style={styles.locationText} numberOfLines={1}>{locationName}</Text>
         </View>
         <View style={styles.statusDot} />
       </View>
 
-      {/* MAP AREA */}
       <View style={styles.mapContainer}>
         <WebView
           ref={webViewRef}
@@ -287,7 +302,7 @@ export default function FullscreenMapScreen({ navigation }) {
           mixedContentMode="always"
           onLoadEnd={() => {
             setIsMapReady(true);
-            sendDataToMap(coords.latitude, coords.longitude, userName, locationName);
+            sendDataToMap(coords.latitude, coords.longitude, userName || 'User', locationName);
           }}
         />
 
@@ -299,7 +314,6 @@ export default function FullscreenMapScreen({ navigation }) {
         )}
       </View>
 
-      {/* BOTTOM ACTION BUTTONS BAR */}
       <View style={styles.bottomBar}>
         <TouchableOpacity 
           style={[styles.actionBtn, styles.secondaryBtn]} 
@@ -322,10 +336,7 @@ export default function FullscreenMapScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: '#0F172A' 
-  },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   topInfoCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -349,7 +360,6 @@ const styles = StyleSheet.create({
   pinText: { fontWeight: 'bold', fontSize: 14, color: '#F8FAFC' },
   locationText: { fontSize: 12, color: '#38BDF8', marginTop: 2 },
   statusDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#22C55E' },
-  
   mapContainer: { 
     flex: 1, 
     position: 'relative',
@@ -359,17 +369,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155'
   },
-  webView: { 
-    flex: 1, 
-    backgroundColor: '#0F172A' 
-  },
+  webView: { flex: 1, backgroundColor: '#0F172A' },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(15, 23, 42, 0.75)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-
   bottomBar: { 
     flexDirection: 'row', 
     gap: 12,

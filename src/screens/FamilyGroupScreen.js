@@ -128,7 +128,9 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
   const [loading, setLoading] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const [currentUserId, setCurrentUserId] = useState(initialUserId ? Number(initialUserId) : null);
-  const [currentUserName, setCurrentUserName] = useState('You');
+  const [currentUserName, setCurrentUserName] = useState('');
+  const [currentUserEmail, setCurrentUserEmail] = useState(null);
+  const [currentUserRole, setCurrentUserRole] = useState('user');
   const [locationName, setLocationName] = useState('Fetching address...');
   const [actionLoading, setActionLoading] = useState(false);
   const [locatingLoading, setLocatingLoading] = useState(false);
@@ -154,7 +156,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
   }, [selectedGroup.id, currentUserId]);
 
   useEffect(() => {
-    sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName, locationName);
+    sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName || 'User', locationName);
   }, [mapCoords, currentUserName, locationName, activeTab]);
 
   const sendDataToMap = (lat, lng, name, address) => {
@@ -176,13 +178,16 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
       if (activeId) {
         const { data: userData } = await supabase
           .from('users')
-          .select('id, name, email')
+          .select('id, name, email, role')
           .eq('id', Number(activeId))
           .maybeSingle();
 
         if (userData) {
           setCurrentUserId(userData.id);
-          setCurrentUserName(userData.name || userData.email || 'You');
+          const nameToUse = userData.name || userData.email;
+          setCurrentUserName(nameToUse);
+          setCurrentUserEmail(userData.email || null);
+          setCurrentUserRole(userData.role || 'user');
         }
       }
 
@@ -231,7 +236,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
 
       const nowIso = new Date().toISOString();
 
-      sendDataToMap(latitude, longitude, currentUserName, addressString);
+      sendDataToMap(latitude, longitude, currentUserName || 'User', addressString);
 
       if (isManualRefresh) {
         const activeId = currentUserId || route?.params?.userId || propUserId;
@@ -262,10 +267,12 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
               activeId,
               'location_update',
               `Updated location: ${addressString}`,
-              { latitude, longitude, address: addressString }
+              currentUserName,
+              currentUserEmail,
+              currentUserRole
             );
           } catch (aErr) {
-            console.log('Audit log skipped:', aErr.message);
+            console.log('Audit log error:', aErr.message);
           }
         }
 
@@ -280,7 +287,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
   };
 
   const locateUserOnly = () => {
-    sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName, locationName);
+    sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName || 'User', locationName);
   };
 
   const fetchFallbackGroupLocation = async () => {
@@ -307,7 +314,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
 
           setMapCoords({ latitude: lat, longitude: lng });
           setLocationName(cleanAddress);
-          sendDataToMap(lat, lng, currentUserName, cleanAddress);
+          sendDataToMap(lat, lng, currentUserName || 'User', cleanAddress);
         }
       }
     } catch (err) {
@@ -321,8 +328,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
     setLocatingLoading(true);
 
     try {
-      // Query notification table for member's latest location update
-      const { data: notifData, error } = await supabase
+      const { data: notifData } = await supabase
         .from('notifications')
         .select('metadata, message')
         .eq('user_id', member.user_id)
@@ -433,10 +439,12 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
                       activeId,
                       'delete_group',
                       `Deleted family group: ${groupName}`,
-                      { groupId: selectedGroup.id }
+                      currentUserName,
+                      currentUserEmail,
+                      currentUserRole
                     );
                   } catch (aErr) {
-                    console.log('Audit log skipped:', aErr.message);
+                    console.log('Audit log error:', aErr.message);
                   }
                 }
                 Alert.alert('Success', 'Group deleted successfully.');
@@ -487,10 +495,12 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
                     activeId,
                     'leave_group',
                     `Left family group: ${groupName}`,
-                    { groupId: selectedGroup.id }
+                    currentUserName,
+                    currentUserEmail,
+                    currentUserRole
                   );
                 } catch (aErr) {
-                  console.log('Audit log skipped:', aErr.message);
+                  console.log('Audit log error:', aErr.message);
                 }
               }
 
@@ -520,7 +530,6 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
-      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.iconButton} onPress={handleBackNavigation}>
           <Ionicons name="arrow-back" size={20} color="#F8FAFC" />
@@ -573,7 +582,6 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
         </View>
       </View>
 
-      {/* Tab Selectors */}
       <View style={styles.tabContainer}>
         {['Overview', 'Live Map'].map((tab) => (
           <TouchableOpacity
@@ -588,24 +596,21 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
         ))}
       </View>
 
-      {/* Main Views */}
       {loading ? (
         <ActivityIndicator color="#38BDF8" size="large" style={{ marginTop: 40 }} />
       ) : activeTab === 'Live Map' ? (
         <View style={styles.mapTabContainer}>
-          {/* USER INFO BAR */}
           <View style={styles.userInfoCard}>
             <View style={styles.badgeIconBox}>
               <Ionicons name="location-sharp" size={20} color="#38BDF8" />
             </View>
             <View style={{ marginLeft: 10, flex: 1 }}>
-              <Text style={styles.pinText}>{currentUserName}</Text>
+              <Text style={styles.pinText}>{currentUserName || 'User Location'}</Text>
               <Text style={styles.locationText} numberOfLines={1}>{locationName}</Text>
             </View>
             <View style={styles.statusDot} />
           </View>
 
-          {/* FULL MAP VIEW */}
           <View style={styles.fullMapBox}>
             <WebView
               ref={fullWebViewRef}
@@ -613,7 +618,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
               source={{ html: MAP_HTML }}
               style={{ flex: 1 }}
               onLoadEnd={() => {
-                sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName, locationName);
+                sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName || 'User', locationName);
               }}
             />
             {locatingLoading && (
@@ -623,7 +628,6 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
             )}
           </View>
 
-          {/* ACTION BUTTONS */}
           <View style={styles.controlsBar}>
             <TouchableOpacity 
               style={[styles.actionBtn, styles.secondaryBtn]} 
@@ -644,7 +648,6 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.scrollContent}>
-          {/* Overview Location Map Card */}
           <View style={styles.card}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
               <Text style={styles.cardTitle}>Current Location</Text>
@@ -653,18 +656,16 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
               </TouchableOpacity>
             </View>
 
-            {/* Overview User Info */}
             <View style={styles.miniUserInfoCard}>
               <View style={styles.badgeIconBox}>
                 <Ionicons name="location-sharp" size={18} color="#38BDF8" />
               </View>
               <View style={{ marginLeft: 8, flex: 1 }}>
-                <Text style={styles.pinText}>{currentUserName}</Text>
+                <Text style={styles.pinText}>{currentUserName || 'User Location'}</Text>
                 <Text style={styles.locationText} numberOfLines={1}>{locationName}</Text>
               </View>
             </View>
 
-            {/* Overview Map Container */}
             <View style={styles.miniMapContainer}>
               <WebView
                 ref={miniWebViewRef}
@@ -673,12 +674,11 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
                 style={{ flex: 1 }}
                 scrollEnabled={false}
                 onLoadEnd={() => {
-                  sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName, locationName);
+                  sendDataToMap(mapCoords.latitude, mapCoords.longitude, currentUserName || 'User', locationName);
                 }}
               />
             </View>
 
-            {/* Overview Map Controls */}
             <View style={styles.overviewControlsBar}>
               <TouchableOpacity 
                 style={[styles.actionBtn, styles.secondaryBtn]} 
@@ -698,7 +698,6 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
             </View>
           </View>
 
-          {/* Group Members List */}
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Group Members ({members.length})</Text>
 
@@ -736,10 +735,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0F172A',
-  },
+  container: { flex: 1, backgroundColor: '#0F172A' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -764,11 +760,9 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 13, fontWeight: '600', color: '#94A3B8' },
   activeTabText: { color: '#0F172A', fontWeight: '700' },
   scrollContent: { padding: 16, paddingBottom: 80 },
-  
   mapTabContainer: { flex: 1, padding: 16, justifyContent: 'space-between' },
   fullMapBox: { flex: 1, borderRadius: 14, overflow: 'hidden', borderWidth: 1, borderColor: '#334155', marginVertical: 12 },
   mapLoadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(15,23,42,0.5)', justifyContent: 'center', alignItems: 'center' },
-
   userInfoCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -801,7 +795,6 @@ const styles = StyleSheet.create({
   pinText: { fontWeight: 'bold', fontSize: 13, color: '#F8FAFC' },
   locationText: { fontSize: 11, color: '#38BDF8', marginTop: 1 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#22C55E' },
-
   controlsBar: { flexDirection: 'row', gap: 10 },
   overviewControlsBar: { flexDirection: 'row', gap: 10, marginTop: 12 },
   actionBtn: { 
@@ -817,7 +810,6 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 12 },
   secondaryBtn: { backgroundColor: '#1E293B', borderWidth: 1, borderColor: '#334155' },
   secondaryBtnText: { color: '#38BDF8', fontWeight: 'bold', fontSize: 12 },
-
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 14,

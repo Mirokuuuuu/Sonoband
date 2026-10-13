@@ -40,15 +40,12 @@ export default function ForgotPasswordScreen({ navigation, onNavigate, userId, i
   const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>_\-]/.test(newPassword);
 
   const navigateToBack = () => {
-    const targetScreen = userSessionActive ? 'settings' : 'login';
-    const stackTargetScreen = userSessionActive ? 'Settings' : 'Login';
-
-    if (onNavigate) {
-      onNavigate(targetScreen);
-    } else if (navigation && navigation.goBack && userSessionActive) {
+    // FIXED: Always attempt goBack first to pop the screen off the stack cleanly
+    if (navigation && typeof navigation.goBack === 'function') {
       navigation.goBack();
-    } else if (navigation && navigation.navigate) {
-      navigation.navigate(stackTargetScreen);
+    } else if (onNavigate) {
+      const targetScreen = userSessionActive ? 'settings' : 'login';
+      onNavigate(targetScreen);
     }
   };
 

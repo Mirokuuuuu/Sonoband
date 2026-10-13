@@ -11,8 +11,19 @@ import {
   Alert
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Feather } from '@expo/vector-icons';
+import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { supabase, logSystemActivity } from '../services/supabaseClient';
+
+// Helper component to dynamically render vector icons from different libraries
+const RenderDynamicIcon = ({ library, icon, size = 18, color = '#38BDF8' }) => {
+  if (library === 'Ionicons') {
+    return <Ionicons name={icon} size={size} color={color} />;
+  }
+  if (library === 'MaterialCommunityIcons') {
+    return <MaterialCommunityIcons name={icon} size={size} color={color} />;
+  }
+  return <Feather name={icon} size={size} color={color} />;
+};
 
 export default function AssignedPatientsScreen({ navigation, onNavigate, userId }) {
   const [patients, setPatients] = useState([]);
@@ -178,22 +189,82 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
     }
   };
 
-  const getSeverityBadge = (type) => {
-    switch (type?.toLowerCase()) {
-      case 'emergency':
-      case 'alert':
-      case 'high':
-        return { label: 'High Severity', color: '#EF4444', bg: '#EF444420', icon: 'volume-2' };
-      case 'warning':
-      case 'medium':
-        return { label: 'Moderate Level', color: '#F59E0B', bg: '#F59E0B20', icon: 'volume-1' };
-      default:
-        return { label: 'Normal / Info', color: '#10B981', bg: '#10B98120', icon: 'volume-x' };
+  // Sound Icon & Color Mapping logic aligned with NotificationScreen.js & AlertsScreen.js
+  const getEventIcon = (title, message, notification_type, metadata) => {
+    const safeTitle = typeof title === 'string' ? title : '';
+    const safeMessage = typeof message === 'string' ? message : '';
+    const safeType = typeof notification_type === 'string' ? notification_type : '';
+    const safeMeta = typeof metadata === 'string' ? metadata : (metadata ? JSON.stringify(metadata) : '');
+
+    const text = `${safeTitle} ${safeMessage} ${safeType} ${safeMeta}`.toLowerCase();
+
+    // Sound Detections
+    if (safeType === 'sound_detection' || text.includes('siren') || text.includes('horn') || text.includes('bark') || text.includes('cry') || text.includes('knock') || text.includes('alarm') || text.includes('shout') || text.includes('glass') || text.includes('fall')) {
+      if (text.includes('siren') || text.includes('emergency')) {
+        return { library: 'Ionicons', icon: 'warning', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)' };
+      }
+      if (text.includes('horn') || text.includes('car horn') || text.includes('vehicle')) {
+        return { library: 'MaterialCommunityIcons', icon: 'car-horn', color: '#F59E0B', bg: 'rgba(245, 158, 11, 0.15)' };
+      }
+      if (text.includes('bark') || text.includes('dog')) {
+        return { library: 'MaterialCommunityIcons', icon: 'dog-side', color: '#10B981', bg: 'rgba(16, 185, 129, 0.15)' };
+      }
+      if (text.includes('cry') || text.includes('baby')) {
+        return { library: 'MaterialCommunityIcons', icon: 'baby-bottle-outline', color: '#EC4899', bg: 'rgba(236, 72, 153, 0.15)' };
+      }
+      if (text.includes('knock') || text.includes('doorbell') || text.includes('door')) {
+        return { library: 'MaterialCommunityIcons', icon: 'doorbell', color: '#8B5CF6', bg: 'rgba(139, 92, 246, 0.15)' };
+      }
+      if (text.includes('alarm') || text.includes('fire')) {
+        return { library: 'Ionicons', icon: 'alarm-outline', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)' };
+      }
+      if (text.includes('glass') || text.includes('fall')) {
+        return { library: 'Ionicons', icon: 'wine-outline', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)' };
+      }
+      if (text.includes('shout') || text.includes('scream') || text.includes('yell')) {
+        return { library: 'Ionicons', icon: 'mega-outline', color: '#F97316', bg: 'rgba(249, 115, 22, 0.15)' };
+      }
+      return { library: 'Feather', icon: 'volume-2', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)' };
     }
+
+    // Connectivity & Power
+    if (safeType === 'connection_status' || text.includes('disconnected')) {
+      return { library: 'Feather', icon: 'link-2', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)' };
+    }
+    if (text.includes('connected') || text.includes('paired')) {
+      return { library: 'Feather', icon: 'link', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)' };
+    }
+
+    // Battery
+    if (safeType === 'battery_update' || text.includes('battery')) {
+      return { library: 'Feather', icon: 'battery-charging', color: '#22C55E', bg: 'rgba(34, 197, 94, 0.15)' };
+    }
+
+    return { library: 'Feather', icon: 'bell', color: '#38BDF8', bg: 'rgba(56, 189, 248, 0.15)' };
+  };
+
+  // Severity classification logic matching NotificationScreen format
+  const getSeverityBadge = (type, title = '', message = '', metadata = '') => {
+    const iconConfig = getEventIcon(title, message, type, metadata);
+    const lowerType = (type || '').toLowerCase();
+
+    if (lowerType === 'critical' || lowerType === 'emergency' || lowerType === 'alert' || lowerType === 'high') {
+      return { label: 'High Severity', color: '#EF4444', bg: 'rgba(239, 68, 68, 0.15)', iconConfig };
+    }
+    if (lowerType === 'warning' || lowerType === 'medium') {
+      return { label: 'Moderate Level', color: '#F59E0B', bg: 'rgba(245, 158, 11, 0.15)', iconConfig };
+    }
+    return { label: 'Normal / Info', color: '#10B981', bg: 'rgba(16, 185, 129, 0.15)', iconConfig };
   };
 
   const renderPatientCard = ({ item }) => {
-    const badge = getSeverityBadge(item.latestAlert?.notification_type);
+    const alertItem = item.latestAlert;
+    const badge = getSeverityBadge(
+      alertItem?.notification_type, 
+      alertItem?.title, 
+      alertItem?.message, 
+      alertItem?.metadata
+    );
 
     return (
       <View style={styles.card}>
@@ -218,10 +289,16 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
           </TouchableOpacity>
         </View>
 
+        {/* Dynamic Severity Box aligned with Notification/Alert screen icon styling */}
         <View style={[styles.statusBox, { backgroundColor: badge.bg }]}>
-          <Feather name={badge.icon} size={16} color={badge.color} />
+          <RenderDynamicIcon 
+            library={badge.iconConfig.library} 
+            icon={badge.iconConfig.icon} 
+            size={18} 
+            color={badge.color} 
+          />
           <Text style={[styles.statusText, { color: badge.color }]}>
-            {item.latestAlert ? `${item.latestAlert.title || 'Notification'} (${badge.label})` : 'No Recent Alerts'}
+            {alertItem ? `${alertItem.title || 'Notification'} (${badge.label})` : 'No Recent Alerts'}
           </Text>
         </View>
 
@@ -293,11 +370,16 @@ export default function AssignedPatientsScreen({ navigation, onNavigate, userId 
                 data={patientAlerts}
                 keyExtractor={(item) => item.id.toString()}
                 renderItem={({ item }) => {
-                  const badge = getSeverityBadge(item.notification_type);
+                  const iconConfig = getEventIcon(item.title, item.message, item.notification_type, item.metadata);
                   return (
                     <View style={styles.alertCard}>
-                      <View style={[styles.alertIcon, { backgroundColor: badge.bg }]}>
-                        <Feather name={badge.icon} size={18} color={badge.color} />
+                      <View style={[styles.alertIcon, { backgroundColor: iconConfig.bg }]}>
+                        <RenderDynamicIcon 
+                          library={iconConfig.library} 
+                          icon={iconConfig.icon} 
+                          size={18} 
+                          color={iconConfig.color} 
+                        />
                       </View>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.alertTitle}>{item.title || 'Notification'}</Text>
