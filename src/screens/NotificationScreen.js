@@ -32,9 +32,7 @@ const MONTHS = [
 
 const FRIENDLY_TYPES = [
   { label: 'All Alerts', value: 'ALL', icon: 'bell', iconType: 'feather' },
-  { label: 'Sound Detections', value: 'sound', icon: 'volume-2', iconType: 'feather' },
   { label: 'Device & Power', value: 'device', icon: 'cpu', iconType: 'feather' },
-  { label: 'Battery', value: 'battery', icon: 'battery-charging', iconType: 'feather' },
   { label: 'Location Updates', value: 'location', icon: 'map-pin', iconType: 'feather' },
   { label: 'Settings & Sync', value: 'settings', icon: 'sliders', iconType: 'feather' },
   { label: 'Group Members', value: 'group', icon: 'users', iconType: 'feather' },
@@ -572,7 +570,7 @@ export default function NotificationScreen({ navigation, onNavigate, userId }) {
                 <View style={{ flex: 1, marginLeft: 12 }}>
                   <Text style={styles.actionTitle}>{String(friendly.title || '')}</Text>
                   <Text style={styles.detailsText}>{String(friendly.desc || '')}</Text>
-                  <Text style={styles.timeText}>{`${dateStr} • ${timeStr}`}</Text>
+                  <Text style={styles.timeText}>{`${dateStr} ${timeStr}`}</Text>
                 </View>
               </View>
             );

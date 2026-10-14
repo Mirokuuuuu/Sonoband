@@ -145,6 +145,24 @@ export default function FullscreenMapScreen({ navigation }) {
     webViewRef.current.postMessage(payload);
   };
 
+  const formatCleanAddress = (addressData) => {
+    if (!addressData || addressData.length === 0) return 'Location updated';
+    const item = addressData[0];
+
+    // Filter out Plus Codes (containing '+') and stray numbers
+    const rawStreet = item.street || '';
+    const cleanStreet = (rawStreet && !rawStreet.includes('+')) ? rawStreet : '';
+    const streetWithNumber = [item.streetNumber, cleanStreet].filter(Boolean).join(' ');
+
+    const parts = [
+      streetWithNumber || item.district || item.subregion,
+      item.city,
+      item.region,
+    ].filter(Boolean);
+
+    return parts.length > 0 ? parts.join(', ') : 'Location updated';
+  };
+
   const locateUserOnly = () => {
     sendDataToMap(coords.latitude, coords.longitude, userName || 'User', locationName);
   };
@@ -206,16 +224,7 @@ export default function FullscreenMapScreen({ navigation }) {
       let addressString = 'Location updated';
       try {
         const addressData = await Location.reverseGeocodeAsync({ latitude, longitude });
-        if (addressData && addressData.length > 0) {
-          const item = addressData[0];
-          const parts = [
-            item.name || item.street,
-            item.district || item.subregion,
-            item.city,
-            item.region
-          ].filter(Boolean);
-          addressString = parts.length > 0 ? parts.join(', ') : 'Location updated';
-        }
+        addressString = formatCleanAddress(addressData);
       } catch (geoError) {
         console.log('Geocoding error:', geoError.message);
       }

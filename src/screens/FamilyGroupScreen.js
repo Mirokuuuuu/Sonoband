@@ -171,6 +171,24 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
     if (miniWebViewRef.current) miniWebViewRef.current.postMessage(payload);
   };
 
+  const formatCleanAddress = (addressData) => {
+    if (!addressData || addressData.length === 0) return 'Location updated';
+    const item = addressData[0];
+
+    // Filter out Plus Codes (containing '+') and stray numbers
+    const rawStreet = item.street || '';
+    const cleanStreet = (rawStreet && !rawStreet.includes('+')) ? rawStreet : '';
+    const streetWithNumber = [item.streetNumber, cleanStreet].filter(Boolean).join(' ');
+
+    const parts = [
+      streetWithNumber || item.district || item.subregion,
+      item.city,
+      item.region,
+    ].filter(Boolean);
+
+    return parts.length > 0 ? parts.join(', ') : 'Location updated';
+  };
+
   const fetchUserAndRoleStatus = async () => {
     try {
       const activeId = currentUserId || route?.params?.userId || propUserId;
@@ -219,16 +237,7 @@ export default function FamilyGroupScreen({ route, navigation, onNavigate, userI
       let addressString = 'Location updated';
       try {
         const addressData = await Location.reverseGeocodeAsync({ latitude, longitude });
-        if (addressData && addressData.length > 0) {
-          const item = addressData[0];
-          const parts = [
-            item.name || item.street,
-            item.district || item.subregion,
-            item.city,
-            item.region
-          ].filter(Boolean);
-          addressString = parts.length > 0 ? parts.join(', ') : 'Location updated';
-        }
+        addressString = formatCleanAddress(addressData);
       } catch (geoErr) {
         console.log('Geocoding error:', geoErr.message);
       }
