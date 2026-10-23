@@ -122,30 +122,30 @@ export default function DevicePairingScreen({
 
       if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
 
-      // Preserve existing device power state instead of forcing is_on: true
-      const keepPowerState = device.is_on ?? false;
+      // Send connection command to ESP32 hardware
+      await sendHardwareCommand(resolvedIp, 'connect', { is_on: true });
 
-      // Notify ESP32 over HTTP
-      await sendHardwareCommand(resolvedIp, 'connect', { is_on: keepPowerState });
-
-      // Update last seen and IP without overriding power state automatically
-      await supabase
+      // Explicitly update is_on to true, update last_seen and active IP address in Supabase
+      const { error: updateError } = await supabase
         .from('user_devices')
         .update({ 
+          is_on: true,
           last_seen: new Date().toISOString(), 
           ip_address: resolvedIp 
         })
         .eq('id', device.id);
 
+      if (updateError) throw updateError;
+
       await createNotification(
         'device_registration',
         'Device Connected',
         `Connected to ${device.device_name || 'SonoBand'} successfully.`,
-        keepPowerState ? 'ON' : 'OFF'
+        'ON'
       );
 
       if (typeof onSelectDevice === 'function') {
-        onSelectDevice({ ...device, ip_address: resolvedIp });
+        onSelectDevice({ ...device, ip_address: resolvedIp, is_on: true });
       }
 
       if (typeof setSyncState === 'function') {
@@ -176,7 +176,7 @@ export default function DevicePairingScreen({
 
             const { error } = await supabase
               .from('user_devices')
-              .update({ is_on: false, last_seen: new Date(0).toISOString() })
+              .update({ is_on: false, last_seen: new Date().toISOString() })
               .eq('id', device.id);
 
             if (error) throw error;
@@ -188,7 +188,6 @@ export default function DevicePairingScreen({
               onDisconnectDevice();
             }
 
-            // Query database for user details matching schema
             let fetchedName = null;
             let fetchedEmail = null;
             let fetchedRole = 'user';
@@ -207,7 +206,6 @@ export default function DevicePairingScreen({
               }
             }
 
-            // Log activity with explicit user credentials
             await logSystemActivity(
               userId,
               'DISCONNECT_DEVICE',
@@ -259,7 +257,6 @@ export default function DevicePairingScreen({
               onDisconnectDevice();
             }
 
-            // Query database for user details matching schema
             let fetchedName = null;
             let fetchedEmail = null;
             let fetchedRole = 'user';
@@ -319,10 +316,9 @@ export default function DevicePairingScreen({
       if (typeof setSyncState === 'function') setSyncState('SYNCING');
 
       const isHardwareAlive = await sendHardwareCommand(resolvedIp, 'ping');
-
       const uniqueMac = macAddressInput.trim() || `MANUAL_${Date.now()}`;
 
-      // Default is_on to false upon registration to prevent auto power-on
+      // Insert new device row
       const { data, error } = await supabase
         .from('user_devices')
         .insert([
@@ -331,7 +327,7 @@ export default function DevicePairingScreen({
             device_name: deviceNameInput.trim(),
             mac_address: uniqueMac,
             ip_address: resolvedIp,
-            is_on: false,
+            is_on: isHardwareAlive, // Set to true if network connection succeeds
             last_seen: isHardwareAlive ? new Date().toISOString() : new Date(0).toISOString(),
           },
         ])
@@ -340,16 +336,23 @@ export default function DevicePairingScreen({
       if (error) throw error;
 
       if (isHardwareAlive) {
-        await sendHardwareCommand(resolvedIp, 'connect', { is_on: false });
+        await sendHardwareCommand(resolvedIp, 'connect', { is_on: true });
         if (typeof setSyncState === 'function') setSyncState('SUCCESS');
         if (typeof setDeviceIp === 'function') setDeviceIp(resolvedIp);
 
         const registeredDevice = data && data.length > 0 ? data[0] : null;
-        if (typeof onSelectDevice === 'function' && registeredDevice) {
-          onSelectDevice(registeredDevice);
+        if (registeredDevice) {
+          await supabase
+            .from('user_devices')
+            .update({ is_on: true })
+            .eq('id', registeredDevice.id);
+
+          if (typeof onSelectDevice === 'function') {
+            onSelectDevice({ ...registeredDevice, is_on: true });
+          }
         }
 
-        Alert.alert('Device Saved & Paired', 'Device registered and reachable over the network!');
+        Alert.alert('Device Saved & Paired', 'Device registered and connected!');
       } else {
         if (typeof setSyncState === 'function') setSyncState('IDLE');
         Alert.alert('Saved (Offline)', 'Device details saved, but the device was not reachable on the network.');
@@ -415,7 +418,7 @@ export default function DevicePairingScreen({
           </View>
         </View>
 
-        {/* Primary Action Button: Add Device */}
+        {/* Action Button: Add Device */}
         <View style={styles.actionSection}>
           <TouchableOpacity
             style={styles.addDeviceButton}

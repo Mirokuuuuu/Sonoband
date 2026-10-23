@@ -1,8 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const SUPABASE_URL = 'https://qdmwobrwokpczqwezjzs.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkbXdvYnJ3b2twY3pxd2V6anpzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyNjg1MDgsImV4cCI6MjA5Nzg0NDUwOH0.dDn4oJE78IcgDHX5U2FbhxHaHFWFbwqP0AbjT5AajY8';
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  console.warn('[Supabase Setup] Missing Expo Public Environment Variables.');
+}
 
 // 1. Initialize and export the Supabase client directly
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -29,7 +33,6 @@ export const logSystemActivity = async (
     let userRole = 'user';
     let extraData = {};
 
-    // Support both Positional Arguments and ExtraData Object calls
     if (typeof param4 === 'string') {
       userName = param4;
       userEmail = param5;
@@ -41,7 +44,6 @@ export const logSystemActivity = async (
       userRole = extraData.role || 'user';
     }
 
-    // Standardize user_id integer parsing for audit_logs_user_id_fkey constraint
     let parsedUserId = null;
     if (userId !== undefined && userId !== null && String(userId).trim() !== '') {
       const numVal = Number(userId);
@@ -50,12 +52,10 @@ export const logSystemActivity = async (
       }
     }
 
-    // Reject UI fallback placeholder strings
     if (userName === 'You' || userName === 'System User' || userName === 'User') {
       userName = null;
     }
 
-    // Fallback: Query public.users table if name or email is missing
     if ((!userName || !userEmail) && userId) {
       try {
         const query = parsedUserId
@@ -89,8 +89,6 @@ export const logSystemActivity = async (
       created_at: new Date().toISOString(),
     };
 
-    console.log('[Audit Log] Sending to audit_logs:', auditPayload);
-
     const { data, error } = await supabase
       .from('audit_logs')
       .insert([auditPayload])
@@ -98,8 +96,6 @@ export const logSystemActivity = async (
 
     if (error) {
       console.error('[Audit Log] Supabase Error:', error.message);
-    } else {
-      console.log('[Audit Log] Insert Success:', data);
     }
   } catch (err) {
     console.error('[Audit Log] Unexpected Error:', err.message);

@@ -27,22 +27,17 @@ export default function DeviceControlScreen({
   const [deviceIp, setDeviceIp] = useState(null);
   const [macAddress, setMacAddress] = useState(null);
 
-  // Initial State synced safely from props
-  const [devicePower, setDevicePower] = useState(Boolean(isDeviceOn));
-  const [vibrationLevel, setVibrationLevel] = useState('medium'); // 'low', 'medium', 'high'
-  const [micRange, setMicRange] = useState('narrow'); // 'narrow', 'broad'
+  // Power state strictly defaults to false (OFF) on screen mount
+  const [devicePower, setDevicePower] = useState(false);
+  const [vibrationLevel, setVibrationLevel] = useState('medium'); 
+  const [micRange, setMicRange] = useState('narrow'); 
 
-  // Initial loaded states to check if values changed on Save
   const [initialVibration, setInitialVibration] = useState('medium');
   const [initialMicRange, setInitialMicRange] = useState('narrow');
 
-  // Track initialization to avoid prop vs DB sync conflicts
   const isInitialized = useRef(false);
-
-  // Reference to background keep-alive ping interval
   const pingIntervalRef = useRef(null);
 
-  // Helper function to insert notifications directly into public.notifications
   const createNotification = async (type, title, message, metadata) => {
     if (!userId) return;
     try {
@@ -64,21 +59,13 @@ export default function DeviceControlScreen({
     }
   };
 
-  // Load device settings whenever userId changes or when screen mounts
   useEffect(() => {
     fetchDeviceSettings();
   }, [userId]);
 
-  // Sync prop changes ONLY after initial fetch completes
+  // Background Heartbeat Loop (only runs when power is explicitly ON and IP exists)
   useEffect(() => {
-    if (isInitialized.current && typeof isDeviceOn === 'boolean') {
-      setDevicePower(isDeviceOn);
-    }
-  }, [isDeviceOn]);
-
-  // Background Heartbeat Loop to keep ESP32 connection alive
-  useEffect(() => {
-    if (deviceIp) {
+    if (deviceIp && devicePower) {
       pingIntervalRef.current = setInterval(async () => {
         try {
           const controller = new AbortController();
@@ -110,7 +97,7 @@ export default function DeviceControlScreen({
         pingIntervalRef.current = null;
       }
     };
-  }, [deviceIp]);
+  }, [deviceIp, devicePower]);
 
   const fetchDeviceSettings = async () => {
     if (!userId) {
@@ -135,13 +122,20 @@ export default function DeviceControlScreen({
 
       if (data && data.length > 0) {
         const device = data[0];
+
+        // Check freshness of last_seen record
+        const lastSeenTime = new Date(device.last_seen || 0).getTime();
+        const threeMinutesAgo = Date.now() - 3 * 60 * 1000;
+        const isFresh = lastSeenTime > threeMinutesAgo;
+
         setDeviceId(device.id);
         setMacAddress(device.mac_address || null);
         setDeviceIp(device.ip_address || device.ip);
 
-        // Sync Power Status directly from Database source of truth
-        const isDbOn = Boolean(device.is_on);
+        // Power status respects database value only if is_on is explicitly true AND last_seen is fresh
+        const isDbOn = Boolean(device.is_on === true && isFresh && isDeviceOn === true);
         setDevicePower(isDbOn);
+        
         if (typeof setIsDeviceOn === 'function') {
           setIsDeviceOn(isDbOn);
         }
@@ -184,7 +178,6 @@ export default function DeviceControlScreen({
     }
   };
 
-  // Dispatch HTTP commands directly to ESP32 WebServer
   const sendHardwareCommand = async (ip, endpoint, payload = {}) => {
     if (!ip) return false;
 
@@ -211,7 +204,6 @@ export default function DeviceControlScreen({
     }
   };
 
-  // Power switch toggle handler
   const handlePowerToggle = async (newValue) => {
     setDevicePower(newValue);
     if (typeof setIsDeviceOn === 'function') {
@@ -255,7 +247,6 @@ export default function DeviceControlScreen({
     }
   };
 
-  // Save settings and trigger notification creation
   const handleSaveSettings = async () => {
     if (!userId) return;
 
@@ -269,12 +260,10 @@ export default function DeviceControlScreen({
         sensitivity: micRange,
       };
 
-      // 1. Push settings directly to ESP32 Hardware
       if (deviceIp) {
         await sendHardwareCommand(deviceIp, 'config', settingsPayload);
       }
 
-      // 2. Sync settings into Supabase database
       const updates = {
         ...settingsPayload,
         user_id: String(userId).trim(),
@@ -293,7 +282,6 @@ export default function DeviceControlScreen({
       const { error } = await query;
       if (error) throw error;
 
-      // 3. Create Notification for Settings/Thresholds Changes
       const changedVibration = initialVibration !== vibrationLevel;
       const changedMicRange = initialMicRange !== micRange;
 

@@ -118,7 +118,9 @@ export default function DashboardScreen({
   isDeviceOn: propIsDeviceOn, 
   setIsDeviceOn,
   userId: propUserId,
-  currentScreen 
+  currentScreen,
+  syncState,
+  deviceIp: propDeviceIp
 }) {
   const [userName, setUserName] = useState('User');
   const [avatarUrl, setAvatarUrl] = useState(null);
@@ -147,20 +149,14 @@ export default function DashboardScreen({
     navigateTo(destinationScreen);
   };
 
-  // FIXED: Explicitly checks if the hardware responds AND if is_connected is true
   const pingHardwareDirectly = async (ip) => {
     if (!ip) return false;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const timeoutId = setTimeout(() => controller.abort(), 1800);
     try {
       const response = await fetch(`http://${ip}:5000/ping`, { signal: controller.signal });
       clearTimeout(timeoutId);
-      if (response.ok) {
-        const data = await response.json();
-        // Return true ONLY if ESP32 state confirms is_connected is true
-        return Boolean(data && data.is_connected === true);
-      }
-      return false;
+      return response.ok;
     } catch {
       clearTimeout(timeoutId);
       return false;
@@ -222,14 +218,27 @@ export default function DashboardScreen({
       if (deviceData && deviceData.length > 0) {
         const dev = deviceData[0];
 
-        // FIXED: Verifies active hardware ping AND is_connected status
-        const isHardwareOnline = await pingHardwareDirectly(dev.ip_address);
-        const powerState = Boolean(dev.is_on && isHardwareOnline);
+        // 1. Check timestamp freshness (must be within the last 3 minutes)
+        const lastSeenTime = new Date(dev.last_seen || 0).getTime();
+        const threeMinutesAgo = Date.now() - 3 * 60 * 1000;
+        const isFresh = lastSeenTime > threeMinutesAgo;
 
-        setIsConnected(isHardwareOnline);
+        // 2. Target IP from global prop or database row
+        const targetIp = propDeviceIp || dev.ip_address;
+
+        // 3. Ping hardware directly over local network
+        const isHardwareOnline = await pingHardwareDirectly(targetIp);
+
+        // 4. Truly CONNECTED only if hardware responds AND last_seen is fresh AND active sync is not IDLE
+        const isAppConnected = Boolean(isHardwareOnline && isFresh && syncState !== 'IDLE');
+
+        // 5. Strictly force powerState to false when first connected or when dev.is_on is false
+        const powerState = Boolean(dev.is_on === true && isAppConnected && propIsDeviceOn === true);
+
+        setIsConnected(isAppConnected);
         setDevicePower(powerState);
         setCurrentDeviceId(dev.id);
-        setDeviceIp(dev.ip_address);
+        setDeviceIp(targetIp);
 
         if (typeof setIsDeviceOn === 'function') {
           setIsDeviceOn(powerState);
@@ -247,11 +256,11 @@ export default function DashboardScreen({
     } catch (err) {
       console.error("Error fetching profile details:", err);
     }
-  }, [propUserId, setIsDeviceOn]);
+  }, [propUserId, propDeviceIp, syncState, propIsDeviceOn, setIsDeviceOn]);
 
   useEffect(() => {
     checkProfileCompletion();
-  }, [propUserId, currentScreen, checkProfileCompletion]);
+  }, [propUserId, currentScreen, syncState, checkProfileCompletion]);
 
   useEffect(() => {
     if (!propUserId) return;
